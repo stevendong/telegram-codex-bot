@@ -27,7 +27,11 @@ class _FakeService:
     async def get_account_usage(self, account: str) -> dict[str, Any]:
         self.usage_requests.append(account)
         return {
-            "primary": {"usedPercent": 20, "windowDurationMins": 300},
+            "primary": {
+                "usedPercent": 20,
+                "windowDurationMins": 300,
+                "resetsAt": 1_800_000_000,
+            },
             "secondary": {"usedPercent": 55, "windowDurationMins": 10080},
         }
 
@@ -142,6 +146,10 @@ class BotCallbackTests(unittest.IsolatedAsyncioTestCase):
             edit_payload = telegram.calls[0][1]
             self.assertIn("当前：reviewer", edit_payload["text"])
             self.assertIn("5 小时剩余 80%", edit_payload["text"])
+            self.assertRegex(
+                edit_payload["text"],
+                r"5 小时剩余 80%（重置 \d{2}-\d{2} \d{2}:\d{2}）",
+            )
             self.assertIn("7 天剩余 45%", edit_payload["text"])
             self.assertIn("reply_markup", edit_payload)
             self.assertEqual(service.usage_requests, ["default"])

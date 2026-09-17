@@ -832,7 +832,12 @@ def _format_compact_usage(value: Any) -> str:
         except (TypeError, ValueError):
             continue
         remaining = max(0, min(100, 100 - used))
-        windows.append(f"{label}剩余 {remaining}%")
+        detail = f"{label}剩余 {remaining}%"
+        resets_at = window.get("resetsAt")
+        if isinstance(resets_at, (int, float)):
+            reset_time = datetime.fromtimestamp(resets_at, UTC).astimezone()
+            detail += f"（重置 {reset_time:%m-%d %H:%M}）"
+        windows.append(detail)
     if windows:
         return " · ".join(windows)
     if value.get("rateLimitReachedType"):
