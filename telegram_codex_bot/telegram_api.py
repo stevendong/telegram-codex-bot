@@ -76,6 +76,21 @@ class TelegramAPI:
         )
         return list(result or [])
 
+    async def configure_command_menu(
+        self, commands: list[dict[str, str]]
+    ) -> None:
+        await self.call(
+            "setMyCommands",
+            {
+                "commands": commands,
+                "scope": {"type": "all_private_chats"},
+            },
+        )
+        await self.call(
+            "setChatMenuButton",
+            {"menu_button": {"type": "commands"}},
+        )
+
     async def send_message(self, chat_id: int, text: str) -> None:
         for chunk in split_text(text):
             await self.call(

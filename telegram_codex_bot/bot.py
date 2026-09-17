@@ -12,6 +12,23 @@ from .telegram_api import TelegramAPI, TelegramError
 
 LOG = logging.getLogger(__name__)
 
+BOT_COMMANDS = [
+    {"command": "start", "description": "打开帮助"},
+    {"command": "agents", "description": "查看并切换 Agent"},
+    {"command": "accounts", "description": "查看 Codex 登录账号"},
+    {"command": "agent", "description": "切换当前 Agent"},
+    {"command": "newagent", "description": "创建新 Agent"},
+    {"command": "forkagent", "description": "分叉当前 Agent"},
+    {"command": "renameagent", "description": "重命名 Agent"},
+    {"command": "deleteagent", "description": "移除 Agent 别名"},
+    {"command": "purgeagent", "description": "永久删除 Agent"},
+    {"command": "threads", "description": "查看账号历史会话"},
+    {"command": "importagent", "description": "导入已有会话"},
+    {"command": "status", "description": "查看当前账号状态和额度"},
+    {"command": "stop", "description": "停止 Agent 当前任务"},
+    {"command": "help", "description": "显示完整帮助"},
+]
+
 HELP = """Telegram Codex Bot
 
 /agents — 列出已命名的 Agent

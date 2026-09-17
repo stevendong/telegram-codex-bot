@@ -17,6 +17,8 @@
 
 ## Telegram 命令
 
+服务启动时会自动为所有私聊注册 Telegram 原生快捷命令菜单，并将聊天菜单按钮设为命令列表。
+
 ```text
 /agents
 /accounts

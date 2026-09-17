@@ -6,10 +6,12 @@ import signal
 
 from .agent_service import AgentService
 from .app_server import CodexAppServer
-from .bot import TelegramCodexBot
+from .bot import BOT_COMMANDS, TelegramCodexBot
 from .config import Config
 from .state import StateStore
-from .telegram_api import TelegramAPI
+from .telegram_api import TelegramAPI, TelegramError
+
+LOG = logging.getLogger(__name__)
 
 
 async def async_main() -> None:
@@ -39,6 +41,10 @@ async def async_main() -> None:
         )
         raise
     try:
+        try:
+            await telegram.configure_command_menu(BOT_COMMANDS)
+        except TelegramError:
+            LOG.exception("Could not update Telegram command menu")
         await bot.run(stop_event)
     finally:
         await asyncio.gather(
