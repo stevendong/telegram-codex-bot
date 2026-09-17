@@ -23,12 +23,13 @@ KillMode=control-group
 
 StateDirectory=telegram-codex-bot
 UMask=0077
-PrivateTmp=true
-NoNewPrivileges=true
-ProtectSystem=strict
-ProtectHome=read-only
-ReadWritePaths=/data /home/ubuntu/.codex /home/ubuntu/.codex-account-4 /home/ubuntu/.codex-agent-opt /var/lib/telegram-codex-bot
-RestrictSUIDSGID=true
+# Codex is deliberately run with the same host access as `codex --yolo`.
+# Keep the Telegram user allowlist and environment file tightly protected.
+PrivateTmp=false
+NoNewPrivileges=false
+ProtectSystem=false
+ProtectHome=false
+RestrictSUIDSGID=false
 
 [Install]
 WantedBy=multi-user.target

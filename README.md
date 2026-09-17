@@ -14,7 +14,8 @@
 - 发现并导入服务器已有 Codex threads
 - 不同 Agent 可以并行运行
 - Telegram 用户 ID 白名单
-- 默认 `workspace-write` 沙盒和 `approvalPolicy=never`
+- 等同 `codex --yolo`：`danger-full-access` 沙盒模式和 `approvalPolicy=never`
+- systemd 不额外限制主机文件系统、网络或 `sudo`，可操作整台服务器
 - 未预期的提权、文件修改审批和 MCP 征询默认拒绝
 - 原子化状态持久化和 systemd 常驻
 - 纯 Python 标准库，无额外 pip 依赖
@@ -82,6 +83,8 @@ TELEGRAM_BOT_TOKEN=BotFather生成的Token
 TELEGRAM_ALLOWED_USER_IDS=你的数字用户ID
 CODEX_ACCOUNTS=default=/home/ubuntu/.codex,account4=/home/ubuntu/.codex-account-4,agentopt=/home/ubuntu/.codex-agent-opt
 CODEX_DEFAULT_ACCOUNT=default
+CODEX_SANDBOX=danger-full-access
+CODEX_ALLOW_DANGER_FULL_ACCESS=true
 ```
 
 不要把真实 Token 写入仓库或发送到聊天中。
@@ -94,7 +97,7 @@ sudo systemctl status telegram-codex-bot
 sudo journalctl -u telegram-codex-bot -f
 ```
 
-systemd 服务以 `ubuntu` 用户运行，分别复用 `CODEX_ACCOUNTS` 中配置的现有登录。不要把同一个正在终端中执行任务的 thread 再导入机器人并同时操作。
+systemd 服务以 `ubuntu` 用户运行，分别复用 `CODEX_ACCOUNTS` 中配置的现有登录。服务允许 Codex 像交互式 `codex --yolo` 一样访问主机，并可使用该用户已有的免密 `sudo` 权限。不要把同一个正在终端中执行任务的 thread 再导入机器人并同时操作。
 
 ## 手动运行
 
@@ -122,7 +125,8 @@ python3 scripts/check-app-server.py
 
 ## 安全说明
 
-- 默认只能写 `/data`；不要轻易改成 `danger-full-access`。
+- 本部署明确使用 `danger-full-access + never`，Codex 可以读写主机上的任意可访问文件、联网和执行命令；若 `ubuntu` 有免密 `sudo`，也可取得 root 权限。
+- Telegram Bot Token 或白名单账号一旦泄露，等同于服务器控制权泄露；必须只允许可信的私聊用户，并为 Telegram 账号启用两步验证。
 - App Server 仅通过子进程 stdio 使用，没有监听公网端口。
 - 仅私聊和白名单用户可以操作。
 - Bot Token 的环境文件权限应保持 `0600`。

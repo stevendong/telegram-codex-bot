@@ -33,3 +33,43 @@ class ConfigTests(unittest.TestCase):
             with patch.dict(os.environ, env, clear=True):
                 with self.assertRaisesRegex(ValueError, "must not be empty"):
                     Config.from_env()
+
+    def test_danger_full_access_requires_explicit_acknowledgement(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            codex = Path(temp) / "codex"
+            codex.touch()
+            account = Path(temp) / "account"
+            account.mkdir()
+            env = {
+                "TELEGRAM_BOT_TOKEN": "token",
+                "TELEGRAM_ALLOWED_USER_IDS": "123",
+                "CODEX_BIN": str(codex),
+                "CODEX_CWD": temp,
+                "CODEX_ACCOUNTS": f"default={account}",
+                "CODEX_SANDBOX": "danger-full-access",
+            }
+            with patch.dict(os.environ, env, clear=True):
+                with self.assertRaisesRegex(
+                    ValueError, "CODEX_ALLOW_DANGER_FULL_ACCESS=true"
+                ):
+                    Config.from_env()
+
+    def test_danger_full_access_is_accepted_when_acknowledged(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            codex = Path(temp) / "codex"
+            codex.touch()
+            account = Path(temp) / "account"
+            account.mkdir()
+            env = {
+                "TELEGRAM_BOT_TOKEN": "token",
+                "TELEGRAM_ALLOWED_USER_IDS": "123",
+                "CODEX_BIN": str(codex),
+                "CODEX_CWD": temp,
+                "CODEX_ACCOUNTS": f"default={account}",
+                "CODEX_SANDBOX": "danger-full-access",
+                "CODEX_ALLOW_DANGER_FULL_ACCESS": "true",
+            }
+            with patch.dict(os.environ, env, clear=True):
+                config = Config.from_env()
+
+            self.assertEqual(config.codex_sandbox, "danger-full-access")
