@@ -18,6 +18,7 @@ PROGRESS_UPDATE_SECONDS = 8
 BOT_COMMANDS = [
     {"command": "agents", "description": "查看并切换 Agent"},
     {"command": "models", "description": "查看当前账号可用模型"},
+    {"command": "effort", "description": "切换当前模型推理强度"},
     {"command": "status", "description": "查看当前账号状态和额度"},
     {"command": "threads", "description": "查看账号历史会话"},
     {"command": "clear", "description": "清除当前上下文并启动新会话"},
@@ -42,6 +43,7 @@ HELP = """Telegram Codex Bot
 /accounts — 列出 Codex 登录账号
 /models — 列出当前账号可用模型
 /model <模型ID|default> — 切换当前 Agent 模型
+/effort <档位|default> — 切换当前模型的推理强度
 /agent <名称> — 切换当前 Agent
 /newagent <名称> [账号] — 创建独立 Agent
 /forkagent <名称> — 从当前 Agent 分叉
@@ -228,6 +230,24 @@ class TelegramCodexBot:
                 await self._edit_or_send(chat_id, message_id, text, markup)
                 await self._answer_callback(query_id, f"已切换模型：{model}")
                 return
+            if data.startswith("effort:"):
+                payload = data.removeprefix("effort:")
+                if ":" not in payload:
+                    raise ValueError("Effort 按钮已过期，请重新发送 /models")
+                target_name, requested = payload.split(":", 1)
+                target_name = normalize_agent_name(target_name)
+                name = self.state.get_active_name(user_id)
+                if target_name != name:
+                    raise ValueError("当前 Agent 已改变，请重新发送 /models")
+                effort = await self.service.set_agent_effort(
+                    user_id, name, requested
+                )
+                text, markup = await self._model_picker(user_id)
+                await self._edit_or_send(chat_id, message_id, text, markup)
+                await self._answer_callback(
+                    query_id, f"已切换 Effort：{effort or '模型默认'}"
+                )
+                return
             if data.startswith("thread:"):
                 token = data.removeprefix("thread:")
                 choice = self._get_thread_choice(token, user_id)
@@ -370,6 +390,14 @@ class TelegramCodexBot:
             name = self.state.get_active_name(user_id)
             if command == "model" and args:
                 await self.service.set_agent_model(user_id, name, args[0])
+            text, markup = await self._model_picker(user_id)
+            await self.telegram.send_message(
+                chat_id, text, reply_markup=markup
+            )
+        elif command == "effort":
+            name = self.state.get_active_name(user_id)
+            if args:
+                await self.service.set_agent_effort(user_id, name, args[0])
             text, markup = await self._model_picker(user_id)
             await self.telegram.send_message(
                 chat_id, text, reply_markup=markup
@@ -640,12 +668,13 @@ class TelegramCodexBot:
             thread_marker = "已连接" if agent.get("thread_id") else "未启动"
             account = agent.get("account", self.config.default_account)
             model = agent.get("model") or self.config.codex_model or "默认模型"
+            effort = agent.get("effort") or "模型默认 Effort"
             account_detail = ""
             account_alias = self.service.account_alias(str(account))
             if name != account_alias:
                 account_detail = f" · 账号 {account_alias}"
             lines.append(
-                f"{marker} {name}{account_detail} · {model} · "
+                f"{marker} {name}{account_detail} · {model} · {effort} · "
                 f"{agent.get('status', 'idle')} · {thread_marker}"
             )
             lines.append(
@@ -669,7 +698,11 @@ class TelegramCodexBot:
         models = await self.service.list_models(account)
         selected_model = agent.get("model") or self.config.codex_model
         return format_models(
-            name, self.service.account_alias(account), models, selected_model
+            name,
+            self.service.account_alias(account),
+            models,
+            selected_model,
+            agent.get("effort"),
         )
 
     async def _reset_picker(
@@ -973,6 +1006,7 @@ def format_status(
         f"当前 Agent：{name}",
         f"Codex 账号：{account_name}",
         f"模型：{agent.get('effective_model') or agent.get('model') or '账号默认模型'}",
+        f"Effort：{agent.get('effort') or '模型默认'}",
         f"任务状态：{agent.get('status', 'idle')}",
         f"Thread：{thread_id}",
     ]
@@ -1039,6 +1073,7 @@ def format_models(
     account: str,
     models: list[dict[str, Any]],
     selected_model: str | None,
+    selected_effort: str | None,
 ) -> tuple[str, dict[str, Any]]:
     if not models:
         return (
@@ -1059,21 +1094,28 @@ def format_models(
         if active_item
         else str(active_model or "账号默认模型")
     )
+    effort_options = _model_effort_options(active_item or {})
+    default_effort = str(
+        (active_item or {}).get("defaultReasoningEffort") or ""
+    ).strip()
+    effective_effort = selected_effort or default_effort or "模型默认"
+    effort_suffix = "（模型默认）" if selected_effort is None else ""
     lines = [
         "模型切换",
         f"Agent：{agent_name}",
         f"Codex 账号：{account}",
         f"当前模型：{active_name}（{active_model or 'default'}）",
+        f"当前 Effort：{effective_effort}{effort_suffix}",
         "",
         "点击按钮切换，下次任务起生效：",
     ]
-    buttons: list[dict[str, str]] = []
+    model_buttons: list[dict[str, str]] = []
     for item in models:
         model = str(item.get("model") or item.get("id") or "unknown")
         display_name = str(item.get("displayName") or model)
         is_active = model == active_model
         default_marker = " · 默认" if item.get("isDefault") else ""
-        buttons.append(
+        model_buttons.append(
             {
                 "text": f"{'✅ ' if is_active else ''}{display_name}{default_marker}",
                 "callback_data": (
@@ -1082,7 +1124,7 @@ def format_models(
             }
         )
     default_is_active = active_model == default_model
-    buttons.append(
+    model_buttons.append(
         {
             "text": "↩️ 使用账号默认模型",
             "callback_data": (
@@ -1090,7 +1132,52 @@ def format_models(
             ),
         }
     )
-    return "\n".join(lines), {"inline_keyboard": _button_rows(buttons)}
+    keyboard = _button_rows(model_buttons)
+    if effort_options:
+        lines.extend(
+            ["", f"可用 Effort：{'、'.join(effort_options)}"]
+        )
+        effort_buttons = [
+            {
+                "text": (
+                    "✅ Effort 默认"
+                    if selected_effort is None
+                    else "↩️ Effort 默认"
+                ),
+                "callback_data": (
+                    "noop"
+                    if selected_effort is None
+                    else f"effort:{agent_name}:default"
+                ),
+            }
+        ]
+        effort_buttons.extend(
+            {
+                "text": f"{'✅ ' if effort == selected_effort else ''}{effort}",
+                "callback_data": (
+                    "noop"
+                    if effort == selected_effort
+                    else f"effort:{agent_name}:{effort}"
+                ),
+            }
+            for effort in effort_options
+        )
+        keyboard.extend(_button_rows(effort_buttons))
+    else:
+        lines.extend(["", "当前模型没有可调 Effort。"])
+    return "\n".join(lines), {"inline_keyboard": keyboard}
+
+
+def _model_effort_options(model: dict[str, Any]) -> list[str]:
+    efforts: list[str] = []
+    for option in model.get("supportedReasoningEfforts") or []:
+        if isinstance(option, dict):
+            effort = str(option.get("reasoningEffort") or "").strip()
+        else:
+            effort = str(option).strip()
+        if effort and effort not in efforts:
+            efforts.append(effort)
+    return efforts
 
 
 def _button_rows(

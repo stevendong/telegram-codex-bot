@@ -45,7 +45,12 @@ class UtilityTests(unittest.TestCase):
     def test_format_status_includes_current_account_quota(self) -> None:
         text = format_status(
             "main",
-            {"account": "default", "status": "failed", "thread_id": "thr_1"},
+            {
+                "account": "default",
+                "effort": "high",
+                "status": "failed",
+                "thread_id": "thr_1",
+            },
             {
                 "name": "default",
                 "logged_in": True,
@@ -68,6 +73,7 @@ class UtilityTests(unittest.TestCase):
             },
         )
         self.assertIn("Codex 账号：default", text)
+        self.assertIn("Effort：high", text)
         self.assertIn("登录状态：已登录（ChatGPT / plus）", text)
         self.assertIn("额度状态：已达到额度上限", text)
         self.assertIn("5 小时额度：已用 100%，剩余 0%", text)
@@ -82,20 +88,28 @@ class UtilityTests(unittest.TestCase):
                     "model": "gpt-default",
                     "displayName": "Default",
                     "isDefault": True,
-                    "supportedReasoningEfforts": [],
+                    "defaultReasoningEffort": "medium",
+                    "supportedReasoningEfforts": [
+                        {"reasoningEffort": "low"},
+                        {"reasoningEffort": "medium"},
+                    ],
                 },
                 {
                     "model": "gpt-selected",
                     "displayName": "Selected",
                     "isDefault": False,
+                    "defaultReasoningEffort": "medium",
                     "supportedReasoningEfforts": [
-                        {"reasoningEffort": "high"}
+                        {"reasoningEffort": "high"},
+                        {"reasoningEffort": "xhigh"},
                     ],
                 },
             ],
             "gpt-selected",
+            "high",
         )
         self.assertIn("当前模型：Selected（gpt-selected）", text)
+        self.assertIn("当前 Effort：high", text)
         buttons = [
             button
             for row in markup["inline_keyboard"]
@@ -113,6 +127,17 @@ class UtilityTests(unittest.TestCase):
         )
         self.assertIn(
             {"text": "✅ Selected", "callback_data": "noop"},
+            buttons,
+        )
+        self.assertIn(
+            {"text": "✅ high", "callback_data": "noop"},
+            buttons,
+        )
+        self.assertIn(
+            {
+                "text": "xhigh",
+                "callback_data": "effort:main:xhigh",
+            },
             buttons,
         )
         self.assertIn(

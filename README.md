@@ -7,7 +7,7 @@
 - 创建、切换、分叉和停止多个 Codex Agent
 - 同时连接多套 Codex 登录，并通过 Agent 名称切换账号
 - 自动以登录邮箱的前 10 个字符命名每套账号的主 Agent
-- 按 Agent 查看并切换账号实际可用的 Codex 模型
+- 按 Agent 查看并切换账号实际可用的 Codex 模型和 reasoning effort
 - 查看、选择并使用账号可用的 reset 重置卡（二次确认）
 - 每个 Agent 保留独立上下文
 - Agent 回答使用 Telegram Rich Markdown 渲染标题、列表、代码、表格和公式
@@ -28,21 +28,22 @@
 
 ```text
 /agents
-/accounts
 /models
-/model <模型ID|default>
-/agent <名称>
-/newagent <名称> [账号]
-/forkagent <新名称>
-/renameagent <旧名称> <新名称>
-/deleteagent <名称>
-/purgeagent <名称> confirm
-/threads [账号]
-/importagent <名称> <thread_id> [账号]
+/effort <档位|default>
 /status  # 当前 Agent、Codex 登录和额度/重置时间
-/reset   # 选择当前账号的 reset 重置卡
+/threads [账号]
 /clear   # 清除当前上下文并立即启动新会话
 /stop [名称]
+/newagent <名称> [账号]
+/forkagent <新名称>
+/accounts
+/reset   # 选择当前账号的 reset 重置卡
+/model <模型ID|default>
+/agent <名称>
+/renameagent <旧名称> <新名称>
+/deleteagent <名称>
+/importagent <名称> <thread_id> [账号]
+/purgeagent <名称> confirm
 /help
 ```
 
@@ -50,7 +51,7 @@
 
 `/threads [账号]` 会列出最近的历史会话并提供点击切换按钮。已绑定的会话会直接切换到对应 Agent；未绑定会话默认连接当前 Agent，查看其他账号时则连接该账号的主 Agent。切换不会删除原会话；如果原 thread 正被命令行或其他 Codex 进程写入，Bot 会自动分叉其已保存上下文并切换到新 thread，避免并发写入冲突。
 
-`/agents` 会在每个 Agent 下显示其账号的短期和长期剩余 Usage 及对应重置时间，并提供可直接点击的切换按钮；多个 Agent 属于同一账号时只查询一次额度。`/models` 会实时读取当前 Agent 所属账号可用的模型；`/model <模型ID>` 仍可用于文字切换，选择会持久化到当前 Agent，并从下一次任务起生效。`/model default` 可恢复账号默认模型。
+`/agents` 会在每个 Agent 下显示其账号的短期和长期剩余 Usage 及对应重置时间，并提供可直接点击的切换按钮；多个 Agent 属于同一账号时只查询一次额度。`/models` 会实时读取当前 Agent 所属账号可用的模型及 reasoning effort，并提供模型和 Effort 切换按钮；`/model <模型ID>` 与 `/effort <档位>` 也可用于文字切换。选择会按 Agent 持久化，并从下一次任务起生效；`default` 可分别恢复账号默认模型或所选模型的默认 Effort。切换模型时，不受新模型支持的 Effort 会自动恢复默认值。
 
 `/reset` 会读取当前 Agent 所属账号的可用重置卡。先选择卡片，再点击“确认使用”才会调用 Codex；卡片 ID 不会显示在 Telegram 中，选择按钮 10 分钟后失效。
 

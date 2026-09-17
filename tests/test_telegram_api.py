@@ -80,6 +80,7 @@ class TelegramAPITests(unittest.IsolatedAsyncioTestCase):
             [
                 "agents",
                 "models",
+                "effort",
                 "status",
                 "threads",
                 "clear",

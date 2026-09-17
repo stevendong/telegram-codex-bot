@@ -31,6 +31,22 @@ class _FakeApp:
                         "model": "gpt-test",
                         "displayName": "GPT Test",
                         "isDefault": True,
+                        "defaultReasoningEffort": "medium",
+                        "supportedReasoningEfforts": [
+                            {"reasoningEffort": "low"},
+                            {"reasoningEffort": "medium"},
+                            {"reasoningEffort": "high"},
+                        ],
+                    },
+                    {
+                        "id": "gpt-fast",
+                        "model": "gpt-fast",
+                        "displayName": "GPT Fast",
+                        "isDefault": False,
+                        "defaultReasoningEffort": "low",
+                        "supportedReasoningEfforts": [
+                            {"reasoningEffort": "low"},
+                        ],
                     }
                 ],
                 "nextCursor": None,
@@ -193,6 +209,13 @@ class AgentServiceTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(result.status, "interrupted")
             self.assertNotIn("running tests", result.text)
             self.assertIsNone(service.get_turn_progress(42, "main"))
+            turn_params = next(
+                params
+                for method, params in app.requests
+                if method == "turn/start"
+            )
+            self.assertIn("effort", turn_params)
+            self.assertIsNone(turn_params["effort"])
             self.assertEqual(app.requests[-1][0], "turn/interrupt")
 
     async def test_switch_agent_thread_resumes_selected_history(self) -> None:
@@ -287,6 +310,23 @@ class AgentServiceTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(selected, "gpt-test")
             self.assertEqual(state.get_agent(42, "main")["model"], "gpt-test")
 
+            effort = await service.set_agent_effort(42, "main", "HIGH")
+            self.assertEqual(effort, "high")
+            self.assertEqual(state.get_agent(42, "main")["effort"], "high")
+
+            selected = await service.set_agent_model(42, "main", "gpt-fast")
+            self.assertEqual(selected, "gpt-fast")
+            self.assertIsNone(state.get_agent(42, "main")["effort"])
+
+            effort = await service.set_agent_effort(42, "main", "low")
+            self.assertEqual(effort, "low")
+            effort = await service.set_agent_effort(42, "main", "default")
+            self.assertIsNone(effort)
+            self.assertIsNone(state.get_agent(42, "main")["effort"])
+
+            with self.assertRaisesRegex(ValueError, "不支持 Effort"):
+                await service.set_agent_effort(42, "main", "high")
+
     async def test_rejects_unavailable_model(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
             state = StateStore(Path(temp) / "state.json")
@@ -347,6 +387,7 @@ class AgentServiceTests(unittest.IsolatedAsyncioTestCase):
                 "main",
                 thread_id="thr-old",
                 model="gpt-test",
+                effort="high",
                 last_error="old error",
             )
             config = SimpleNamespace(
@@ -366,6 +407,7 @@ class AgentServiceTests(unittest.IsolatedAsyncioTestCase):
             agent = state.get_agent(42, "main")
             self.assertEqual(agent["thread_id"], "thr-new")
             self.assertEqual(agent["model"], "gpt-test")
+            self.assertEqual(agent["effort"], "high")
             self.assertEqual(agent["account"], "default")
             self.assertIsNone(agent["last_error"])
             self.assertNotIn(

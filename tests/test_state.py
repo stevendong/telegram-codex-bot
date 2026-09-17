@@ -20,11 +20,14 @@ class StateStoreTests(unittest.TestCase):
     def test_default_agent_and_persistence(self) -> None:
         self.state.ensure_default(42)
         self.assertEqual(self.state.get_active_name(42), "main")
-        self.state.update_agent(42, "main", thread_id="thr_1")
+        self.state.update_agent(
+            42, "main", thread_id="thr_1", effort="high"
+        )
 
         reloaded = StateStore(self.path)
         self.assertEqual(reloaded.get_agent(42, "main")["thread_id"], "thr_1")
         self.assertIsNone(reloaded.get_agent(42, "main")["model"])
+        self.assertEqual(reloaded.get_agent(42, "main")["effort"], "high")
         self.assertEqual(self.path.stat().st_mode & 0o777, 0o600)
 
     def test_switch_rename_and_detach(self) -> None:

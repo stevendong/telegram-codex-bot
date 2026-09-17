@@ -47,6 +47,7 @@ class _FakeModelService(_FakeService):
     def __init__(self, state: StateStore) -> None:
         self.state = state
         self.selected: list[tuple[int, str, str]] = []
+        self.selected_efforts: list[tuple[int, str, str]] = []
 
     async def list_models(self, account: str) -> list[dict[str, Any]]:
         del account
@@ -55,11 +56,23 @@ class _FakeModelService(_FakeService):
                 "model": "gpt-default",
                 "displayName": "Default",
                 "isDefault": True,
+                "defaultReasoningEffort": "medium",
+                "supportedReasoningEfforts": [
+                    {"reasoningEffort": "low"},
+                    {"reasoningEffort": "medium"},
+                    {"reasoningEffort": "high"},
+                ],
             },
             {
                 "model": "gpt-other",
                 "displayName": "Other",
                 "isDefault": False,
+                "defaultReasoningEffort": "high",
+                "supportedReasoningEfforts": [
+                    {"reasoningEffort": "medium"},
+                    {"reasoningEffort": "high"},
+                    {"reasoningEffort": "xhigh"},
+                ],
             },
         ]
 
@@ -67,8 +80,16 @@ class _FakeModelService(_FakeService):
         self, user_id: int, name: str, model: str
     ) -> str:
         self.selected.append((user_id, name, model))
-        self.state.update_agent(user_id, name, model=model)
+        self.state.update_agent(user_id, name, model=model, effort=None)
         return model
+
+    async def set_agent_effort(
+        self, user_id: int, name: str, effort: str
+    ) -> str | None:
+        self.selected_efforts.append((user_id, name, effort))
+        selected = None if effort == "default" else effort
+        self.state.update_agent(user_id, name, effort=selected)
+        return selected
 
 
 class _FakeResetService(_FakeService):
@@ -480,6 +501,33 @@ class BotCallbackTests(unittest.IsolatedAsyncioTestCase):
             methods = [method for method, _ in telegram.calls]
             self.assertEqual(methods, ["editMessageText", "answerCallbackQuery"])
             self.assertIn("当前模型：Other（gpt-other）", telegram.calls[0][1]["text"])
+
+            effort_button = next(
+                button
+                for row in telegram.calls[0][1]["reply_markup"]["inline_keyboard"]
+                for button in row
+                if button["callback_data"] == "effort:main:xhigh"
+            )
+            await bot._handle_update(  # noqa: SLF001
+                {
+                    "callback_query": {
+                        "id": "query-effort",
+                        "from": {"id": 42},
+                        "message": {
+                            "message_id": 8,
+                            "chat": {"id": 42, "type": "private"},
+                        },
+                        "data": effort_button["callback_data"],
+                    }
+                }
+            )
+
+            self.assertEqual(
+                service.selected_efforts, [(42, "main", "xhigh")]
+            )
+            self.assertEqual(state.get_agent(42, "main")["effort"], "xhigh")
+            self.assertIn("当前 Effort：xhigh", telegram.calls[-2][1]["text"])
+            self.assertIn("已切换 Effort：xhigh", telegram.calls[-1][1]["text"])
 
     async def test_reset_card_requires_selection_and_confirmation(self) -> None:
         with tempfile.TemporaryDirectory() as temp:

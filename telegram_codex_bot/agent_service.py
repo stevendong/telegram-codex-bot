@@ -235,8 +235,75 @@ class AgentService:
                 raise ValueError(f"账号 {account} 没有返回默认模型")
             raise ValueError(f"账号 {account} 不支持模型：{requested}")
         model = str(match["model"])
-        self.state.update_agent(user_id, name, model=model)
+        supported_efforts = {
+            effort.lower(): effort
+            for effort in self._supported_efforts(match)
+        }
+        current_effort = str(agent.get("effort") or "")
+        effort = supported_efforts.get(current_effort.lower())
+        self.state.update_agent(user_id, name, model=model, effort=effort)
         return model
+
+    async def set_agent_effort(
+        self, user_id: int, name: str, raw_effort: str
+    ) -> str | None:
+        agent = self.state.get_agent(user_id, name)
+        if not agent:
+            raise KeyError(name)
+        if agent.get("status") == "running":
+            raise ValueError("Agent 正在运行，请完成或停止后再切换 Effort")
+        account = str(agent.get("account") or self.config.default_account)
+        models = await self.list_models(account)
+        selected_model = agent.get("model") or self.config.codex_model
+        if selected_model:
+            model = next(
+                (
+                    item
+                    for item in models
+                    if str(selected_model).lower()
+                    in {
+                        str(item.get("model", "")).lower(),
+                        str(item.get("id", "")).lower(),
+                    }
+                ),
+                None,
+            )
+        else:
+            model = next(
+                (item for item in models if item.get("isDefault")), None
+            )
+        if model is None:
+            raise ValueError(f"账号 {account} 没有返回当前模型信息")
+
+        requested = raw_effort.strip()
+        if requested.lower() == "default":
+            effort = None
+        else:
+            supported = {
+                value.lower(): value
+                for value in self._supported_efforts(model)
+            }
+            effort = supported.get(requested.lower())
+            if effort is None:
+                choices = "、".join(supported.values()) or "无"
+                raise ValueError(
+                    f"模型 {model.get('model')} 不支持 Effort：{requested}；"
+                    f"可用值：{choices}"
+                )
+        self.state.update_agent(user_id, name, effort=effort)
+        return effort
+
+    @staticmethod
+    def _supported_efforts(model: dict[str, Any]) -> list[str]:
+        efforts: list[str] = []
+        for option in model.get("supportedReasoningEfforts") or []:
+            if isinstance(option, dict):
+                value = str(option.get("reasoningEffort") or "").strip()
+            else:
+                value = str(option).strip()
+            if value and value not in efforts:
+                efforts.append(value)
+        return efforts
 
     async def create_agent(
         self,
@@ -288,13 +355,13 @@ class AgentService:
         account = str(source.get("account") or self.config.default_account)
         app = self._app(account)
         model = source.get("model")
+        effort = source.get("effort")
         params = {"threadId": source["thread_id"], **self._thread_params(model)}
         result = await app.request("thread/fork", params)
         thread_id = str(result["thread"]["id"])
         self._loaded_threads.add((account, thread_id))
         self.state.create_agent(user_id, name, thread_id, account=account)
-        if model:
-            self.state.update_agent(user_id, name, model=model)
+        self.state.update_agent(user_id, name, model=model, effort=effort)
         return name
 
     async def list_server_threads(
@@ -394,6 +461,7 @@ class AgentService:
                 selected_model = agent.get("model") or self.config.codex_model
                 if selected_model:
                     turn_params["model"] = selected_model
+                turn_params["effort"] = agent.get("effort")
                 response = await app.request("turn/start", turn_params)
                 run.turn_id = str(response["turn"]["id"])
                 self.state.update_agent(user_id, name, active_turn_id=run.turn_id)
