@@ -3,7 +3,7 @@ from __future__ import annotations
 import unittest
 
 from telegram_codex_bot.agent_service import normalize_agent_name
-from telegram_codex_bot.bot import format_status, parse_command
+from telegram_codex_bot.bot import format_models, format_status, parse_command
 from telegram_codex_bot.telegram_api import split_text
 
 
@@ -53,3 +53,29 @@ class UtilityTests(unittest.TestCase):
         self.assertIn("额度状态：已达到额度上限", text)
         self.assertIn("5 小时额度：已用 100%，剩余 0%", text)
         self.assertIn("7 天额度：已用 48%，剩余 52%", text)
+
+    def test_format_models_marks_selected_model(self) -> None:
+        text = format_models(
+            "main",
+            "default",
+            [
+                {
+                    "model": "gpt-default",
+                    "displayName": "Default",
+                    "isDefault": True,
+                    "supportedReasoningEfforts": [],
+                },
+                {
+                    "model": "gpt-selected",
+                    "displayName": "Selected",
+                    "isDefault": False,
+                    "supportedReasoningEfforts": [
+                        {"reasoningEffort": "high"}
+                    ],
+                },
+            ],
+            "gpt-selected",
+        )
+        self.assertIn("○ Default — gpt-default（账号默认）", text)
+        self.assertIn("● Selected — gpt-selected；推理：high", text)
+        self.assertIn("/model default", text)

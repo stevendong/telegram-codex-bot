@@ -56,15 +56,16 @@ class AgentService:
         self._locks: dict[tuple[int, str], asyncio.Lock] = {}
         self._semaphore = asyncio.Semaphore(config.max_parallel_turns)
 
-    def _thread_params(self) -> dict[str, Any]:
+    def _thread_params(self, model: str | None = None) -> dict[str, Any]:
         params: dict[str, Any] = {
             "cwd": str(self.config.codex_cwd),
             "approvalPolicy": "never",
             "sandbox": self.config.codex_sandbox,
             "serviceName": "telegram_codex_bot",
         }
-        if self.config.codex_model:
-            params["model"] = self.config.codex_model
+        selected_model = model or self.config.codex_model
+        if selected_model:
+            params["model"] = selected_model
         return params
 
     def account_names(self) -> list[str]:
@@ -101,6 +102,58 @@ class AgentService:
         except Exception as exc:
             status["rate_limit_error"] = str(exc)
         return status
+
+    async def list_models(self, account: str) -> list[dict[str, Any]]:
+        app = self._app(account)
+        models: list[dict[str, Any]] = []
+        cursor: str | None = None
+        while True:
+            result = await app.request(
+                "model/list",
+                {
+                    "cursor": cursor,
+                    "limit": 100,
+                    "includeHidden": False,
+                },
+            )
+            models.extend(result.get("data") or [])
+            cursor = result.get("nextCursor")
+            if not cursor:
+                return models
+
+    async def set_agent_model(
+        self, user_id: int, name: str, raw_model: str
+    ) -> str | None:
+        agent = self.state.get_agent(user_id, name)
+        if not agent:
+            raise KeyError(name)
+        if agent.get("status") == "running":
+            raise ValueError("Agent 正在运行，请完成或停止后再切换模型")
+        requested = raw_model.strip()
+        account = str(agent.get("account") or self.config.default_account)
+        models = await self.list_models(account)
+        if requested.lower() == "default":
+            match = next((item for item in models if item.get("isDefault")), None)
+        else:
+            match = next(
+                (
+                    item
+                    for item in models
+                    if requested.lower()
+                    in {
+                        str(item.get("model", "")).lower(),
+                        str(item.get("id", "")).lower(),
+                    }
+                ),
+                None,
+            )
+        if match is None:
+            if requested.lower() == "default":
+                raise ValueError(f"账号 {account} 没有返回默认模型")
+            raise ValueError(f"账号 {account} 不支持模型：{requested}")
+        model = str(match["model"])
+        self.state.update_agent(user_id, name, model=model)
+        return model
 
     async def create_agent(
         self,
@@ -151,11 +204,14 @@ class AgentService:
             raise ValueError("当前 Agent 正在运行，请完成或停止后再分叉")
         account = str(source.get("account") or self.config.default_account)
         app = self._app(account)
-        params = {"threadId": source["thread_id"], **self._thread_params()}
+        model = source.get("model")
+        params = {"threadId": source["thread_id"], **self._thread_params(model)}
         result = await app.request("thread/fork", params)
         thread_id = str(result["thread"]["id"])
         self._loaded_threads.add((account, thread_id))
         self.state.create_agent(user_id, name, thread_id, account=account)
+        if model:
+            self.state.update_agent(user_id, name, model=model)
         return name
 
     async def list_server_threads(
@@ -178,6 +234,7 @@ class AgentService:
         async with lock, self._semaphore:
             account, thread_id = await self._ensure_thread(user_id, name)
             app = self._app(account)
+            agent = self.state.get_agent(user_id, name) or {}
             loop = asyncio.get_running_loop()
             run = _TurnRun(done=loop.create_future())
             self._runs[(account, thread_id)] = run
@@ -189,13 +246,14 @@ class AgentService:
                 last_error=None,
             )
             try:
-                response = await app.request(
-                    "turn/start",
-                    {
-                        "threadId": thread_id,
-                        "input": [{"type": "text", "text": text}],
-                    },
-                )
+                turn_params: dict[str, Any] = {
+                    "threadId": thread_id,
+                    "input": [{"type": "text", "text": text}],
+                }
+                selected_model = agent.get("model") or self.config.codex_model
+                if selected_model:
+                    turn_params["model"] = selected_model
+                response = await app.request("turn/start", turn_params)
                 run.turn_id = str(response["turn"]["id"])
                 self.state.update_agent(user_id, name, active_turn_id=run.turn_id)
                 completed = await asyncio.wait_for(
@@ -280,15 +338,16 @@ class AgentService:
             raise KeyError(name)
         account = str(agent.get("account") or self.config.default_account)
         app = self._app(account)
+        model = agent.get("model")
         thread_id = agent.get("thread_id")
         if not thread_id:
-            result = await app.request("thread/start", self._thread_params())
+            result = await app.request("thread/start", self._thread_params(model))
             thread_id = str(result["thread"]["id"])
             self.state.update_agent(user_id, name, thread_id=thread_id)
             self._loaded_threads.add((account, thread_id))
             return account, thread_id
         if (account, thread_id) not in self._loaded_threads:
-            params = {"threadId": thread_id, **self._thread_params()}
+            params = {"threadId": thread_id, **self._thread_params(model)}
             await app.request("thread/resume", params)
             self._loaded_threads.add((account, thread_id))
         return account, str(thread_id)

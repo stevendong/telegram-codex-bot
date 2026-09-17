@@ -16,6 +16,8 @@ BOT_COMMANDS = [
     {"command": "start", "description": "打开帮助"},
     {"command": "agents", "description": "查看并切换 Agent"},
     {"command": "accounts", "description": "查看 Codex 登录账号"},
+    {"command": "models", "description": "查看当前账号可用模型"},
+    {"command": "model", "description": "切换当前 Agent 模型"},
     {"command": "agent", "description": "切换当前 Agent"},
     {"command": "newagent", "description": "创建新 Agent"},
     {"command": "forkagent", "description": "分叉当前 Agent"},
@@ -33,6 +35,8 @@ HELP = """Telegram Codex Bot
 
 /agents — 列出已命名的 Agent
 /accounts — 列出 Codex 登录账号
+/models — 列出当前账号可用模型
+/model <模型ID|default> — 切换当前 Agent 模型
 /agent <名称> — 切换当前 Agent
 /newagent <名称> [账号] — 创建独立 Agent
 /forkagent <名称> — 从当前 Agent 分叉
@@ -146,6 +150,24 @@ class TelegramCodexBot:
             await self.telegram.send_message(chat_id, self._format_agents(user_id))
         elif command == "accounts":
             await self.telegram.send_message(chat_id, self._format_accounts(user_id))
+        elif command in {"models", "model"}:
+            name = self.state.get_active_name(user_id)
+            agent = self.state.get_agent(user_id, name) or {}
+            account = str(agent.get("account") or self.config.default_account)
+            if command == "model" and args:
+                model = await self.service.set_agent_model(user_id, name, args[0])
+                selected = model or self.config.codex_model or "账号默认模型"
+                await self.telegram.send_message(
+                    chat_id,
+                    f"Agent {name} 已切换模型：{selected}\n下一次任务起生效。",
+                )
+            else:
+                models = await self.service.list_models(account)
+                selected_model = agent.get("model") or self.config.codex_model
+                await self.telegram.send_message(
+                    chat_id,
+                    format_models(name, account, models, selected_model),
+                )
         elif command == "agent":
             self._require_args(args, 1, "/agent <名称>")
             name = normalize_agent_name(args[0])
@@ -211,6 +233,9 @@ class TelegramCodexBot:
             agent = self.state.get_agent(user_id, name) or {}
             account = str(agent.get("account") or self.config.default_account)
             account_status = await self.service.get_account_status(account)
+            agent["effective_model"] = (
+                agent.get("model") or self.config.codex_model or "账号默认模型"
+            )
             await self.telegram.send_message(
                 chat_id,
                 format_status(name, agent, account_status),
@@ -310,6 +335,7 @@ def format_status(
     lines = [
         f"当前 Agent：{name}",
         f"Codex 账号：{account_name}",
+        f"模型：{agent.get('effective_model') or agent.get('model') or '账号默认模型'}",
         f"任务状态：{agent.get('status', 'idle')}",
         f"Thread：{thread_id}",
     ]
@@ -365,6 +391,44 @@ def format_status(
             reset_time = datetime.fromtimestamp(resets_at, UTC).astimezone()
             line += f"，重置 {reset_time:%m-%d %H:%M}"
         lines.append(line)
+    return "\n".join(lines)
+
+
+def format_models(
+    agent_name: str,
+    account: str,
+    models: list[dict[str, Any]],
+    selected_model: str | None,
+) -> str:
+    if not models:
+        return f"账号 {account} 没有返回可用模型。"
+    default_model = next(
+        (str(item.get("model")) for item in models if item.get("isDefault")),
+        None,
+    )
+    active_model = selected_model or default_model
+    lines = [f"Agent：{agent_name}", f"Codex 账号：{account}", "可用模型："]
+    for item in models:
+        model = str(item.get("model") or item.get("id") or "unknown")
+        display_name = str(item.get("displayName") or model)
+        marker = "●" if model == active_model else "○"
+        default_marker = "（账号默认）" if item.get("isDefault") else ""
+        efforts = [
+            str(option.get("reasoningEffort"))
+            for option in item.get("supportedReasoningEfforts", [])
+            if option.get("reasoningEffort")
+        ]
+        effort_text = f"；推理：{', '.join(efforts)}" if efforts else ""
+        lines.append(
+            f"{marker} {display_name} — {model}{default_marker}{effort_text}"
+        )
+    lines.extend(
+        [
+            "",
+            "切换：/model <模型ID>",
+            "恢复账号默认：/model default",
+        ]
+    )
     return "\n".join(lines)
 
 

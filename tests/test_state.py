@@ -24,6 +24,7 @@ class StateStoreTests(unittest.TestCase):
 
         reloaded = StateStore(self.path)
         self.assertEqual(reloaded.get_agent(42, "main")["thread_id"], "thr_1")
+        self.assertIsNone(reloaded.get_agent(42, "main")["model"])
         self.assertEqual(self.path.stat().st_mode & 0o777, 0o600)
 
     def test_switch_rename_and_detach(self) -> None:

@@ -6,6 +6,7 @@
 
 - 创建、切换、分叉和停止多个 Codex Agent
 - 同时连接多套 Codex 登录，并通过 Agent 名称切换账号
+- 按 Agent 查看并切换账号实际可用的 Codex 模型
 - 每个 Agent 保留独立上下文
 - 发现并导入服务器已有 Codex threads
 - 不同 Agent 可以并行运行
@@ -22,6 +23,8 @@
 ```text
 /agents
 /accounts
+/models
+/model <模型ID|default>
 /agent <名称>
 /newagent <名称> [账号]
 /forkagent <新名称>
@@ -36,6 +39,8 @@
 ```
 
 `/deleteagent` 只删除 Telegram 别名，不删除 Codex 历史；`/purgeagent` 才会永久删除 thread。
+
+`/models` 会实时列出当前 Agent 所属账号可用的模型；`/model <模型ID>` 将选择持久化到当前 Agent，并从下一次任务起生效。`/model default` 可恢复账号默认模型。
 
 启动后会为每套登录自动准备一个可切换的 Agent。本机默认显示 `main @default`、`account4 @account4`、`agentopt @agentopt`；发送 `/agent account4` 即切换账号。首次向尚未启动的 Agent 发消息时才创建 thread。
 

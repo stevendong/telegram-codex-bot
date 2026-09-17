@@ -35,6 +35,7 @@ class StateStore:
             for user in self._data["users"].values():
                 for agent in user.get("agents", {}).values():
                     agent.setdefault("account", "default")
+                    agent.setdefault("model", None)
                     if agent.get("status") == "running":
                         agent["status"] = "idle"
                         agent["active_turn_id"] = None
@@ -65,6 +66,7 @@ class StateStore:
                 stamp = now_iso()
                 user["agents"]["main"] = {
                     "account": default_account,
+                    "model": None,
                     "thread_id": None,
                     "status": "idle",
                     "active_turn_id": None,
@@ -89,6 +91,7 @@ class StateStore:
                 stamp = now_iso()
                 user["agents"]["main"] = {
                     "account": default_account,
+                    "model": None,
                     "thread_id": None,
                     "status": "idle",
                     "active_turn_id": None,
@@ -117,6 +120,7 @@ class StateStore:
                     suffix += 1
                 user["agents"][alias] = {
                     "account": account,
+                    "model": None,
                     "thread_id": None,
                     "status": "idle",
                     "active_turn_id": None,
@@ -143,6 +147,7 @@ class StateStore:
             stamp = now_iso()
             user["agents"][name] = {
                 "account": account,
+                "model": None,
                 "thread_id": thread_id,
                 "status": "idle",
                 "active_turn_id": None,
