@@ -13,6 +13,7 @@ from . import __version__
 
 LOG = logging.getLogger(__name__)
 NotificationHandler = Callable[[str, dict[str, Any]], Awaitable[None] | None]
+APP_SERVER_STREAM_LIMIT = 64 * 1024 * 1024
 
 
 class AppServerError(RuntimeError):
@@ -58,6 +59,7 @@ class CodexAppServer:
             stdin=asyncio.subprocess.PIPE,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
+            limit=APP_SERVER_STREAM_LIMIT,
             env=child_env,
         )
         self._reader_task = asyncio.create_task(self._reader_loop())

@@ -5,7 +5,7 @@ import json
 import unittest
 from pathlib import Path
 
-from telegram_codex_bot.app_server import CodexAppServer
+from telegram_codex_bot.app_server import APP_SERVER_STREAM_LIMIT, CodexAppServer
 
 
 class _FakeStdin:
@@ -26,6 +26,9 @@ class _FakeProcess:
 
 
 class AppServerTests(unittest.IsolatedAsyncioTestCase):
+    def test_stream_limit_accepts_large_thread_payloads(self) -> None:
+        self.assertGreaterEqual(APP_SERVER_STREAM_LIMIT, 16 * 1024 * 1024)
+
     async def test_approval_requests_are_declined(self) -> None:
         client = CodexAppServer("codex", Path("/data"))
         process = _FakeProcess()

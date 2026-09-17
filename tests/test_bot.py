@@ -111,6 +111,7 @@ class _FakeThreadService(_FakeService):
         super().__init__()
         self.state = state
         self.switched: list[tuple[int, str, str, str]] = []
+        self.switch_outcome = "resumed"
 
     async def list_server_threads(
         self, account: str, limit: int = 15
@@ -135,10 +136,10 @@ class _FakeThreadService(_FakeService):
         name: str,
         account: str,
         thread_id: str,
-    ) -> bool:
+    ) -> str:
         self.switched.append((user_id, name, account, thread_id))
         self.state.update_agent(user_id, name, thread_id=thread_id)
-        return True
+        return self.switch_outcome
 
 
 class _RecordingTelegramAPI(TelegramAPI):
@@ -190,6 +191,7 @@ class BotCallbackTests(unittest.IsolatedAsyncioTestCase):
             callback_data = buttons[1][0]["callback_data"]
             self.assertTrue(callback_data.startswith("thread:"))
             self.assertLessEqual(len(callback_data.encode()), 64)
+            service.switch_outcome = "forked"
 
             await bot._handle_update(  # noqa: SLF001
                 {
@@ -214,6 +216,7 @@ class BotCallbackTests(unittest.IsolatedAsyncioTestCase):
                 [method for method, _ in telegram.calls[-2:]],
                 ["editMessageText", "answerCallbackQuery"],
             )
+            self.assertIn("已分叉上下文", telegram.calls[-1][1]["text"])
 
     async def test_clear_command_starts_fresh_context_for_current_agent(self) -> None:
         with tempfile.TemporaryDirectory() as temp:

@@ -7,7 +7,7 @@ import uuid
 from dataclasses import dataclass, field
 from typing import Any
 
-from .app_server import CodexAppServer
+from .app_server import AppServerError, CodexAppServer
 from .config import Config
 from .state import StateStore
 
@@ -308,7 +308,7 @@ class AgentService:
         name: str,
         account: str,
         thread_id: str,
-    ) -> bool:
+    ) -> str:
         """Bind an Agent to an existing thread without deleting its old thread."""
         name = normalize_agent_name(name)
         lock = self._locks.setdefault((user_id, name), asyncio.Lock())
@@ -327,25 +327,34 @@ class AgentService:
                 raise ValueError("所选会话与目标 Agent 不属于同一 Codex 账号")
             old_thread_id = agent.get("thread_id")
             if str(old_thread_id or "") == thread_id:
-                return False
+                return "unchanged"
             app = self._app(account)
             params = {
                 "threadId": thread_id,
                 **self._thread_params(agent.get("model")),
             }
-            await app.request("thread/resume", params)
+            selected_thread_id = thread_id
+            outcome = "resumed"
+            try:
+                await app.request("thread/resume", params)
+            except AppServerError as exc:
+                if "already has an active writer" not in str(exc):
+                    raise
+                result = await app.request("thread/fork", params)
+                selected_thread_id = str(result["thread"]["id"])
+                outcome = "forked"
             self.state.update_agent(
                 user_id,
                 name,
-                thread_id=thread_id,
+                thread_id=selected_thread_id,
                 status="idle",
                 active_turn_id=None,
                 last_error=None,
             )
-            self._loaded_threads.add((account, thread_id))
+            self._loaded_threads.add((account, selected_thread_id))
             if old_thread_id:
                 self._loaded_threads.discard((account, str(old_thread_id)))
-            return True
+            return outcome
 
     async def run_turn(self, user_id: int, name: str, text: str) -> TurnResult:
         name = normalize_agent_name(name)

@@ -222,15 +222,17 @@ class TelegramCodexBot:
                 name = str(choice["agent"])
                 account = str(choice["account"])
                 thread_id = str(choice["thread_id"])
-                await self.service.switch_agent_thread(
+                outcome = await self.service.switch_agent_thread(
                     user_id, name, account, thread_id
                 )
                 self.state.set_active(user_id, name)
                 text, markup = await self._thread_picker(user_id, account)
                 await self._edit_or_send(chat_id, message_id, text, markup)
-                await self._answer_callback(
-                    query_id, f"已切换到会话：{choice['label']}"
-                )
+                if outcome == "forked":
+                    answer = "原会话正被其他 Codex 使用，已分叉上下文并切换"
+                else:
+                    answer = f"已切换到会话：{choice['label']}"
+                await self._answer_callback(query_id, answer)
                 return
             if data.startswith("resetpick:"):
                 token = data.removeprefix("resetpick:")

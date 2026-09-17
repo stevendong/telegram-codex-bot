@@ -7,6 +7,7 @@ from types import SimpleNamespace
 from typing import Any
 
 from telegram_codex_bot.agent_service import AgentService
+from telegram_codex_bot.app_server import AppServerError
 from telegram_codex_bot.state import StateStore
 
 
@@ -65,6 +66,21 @@ class _FakeApp:
         raise AssertionError(f"Unexpected request: {method}")
 
 
+class _ActiveWriterApp(_FakeApp):
+    async def request(
+        self, method: str, params: dict[str, Any]
+    ) -> dict[str, Any]:
+        self.requests.append((method, params))
+        if method == "thread/resume":
+            raise AppServerError(
+                f"thread {params['threadId']} already has an active writer "
+                "(code=-32600)"
+            )
+        if method == "thread/fork":
+            return {"thread": {"id": "thr-forked"}}
+        return await super().request(method, params)
+
+
 class AgentServiceTests(unittest.IsolatedAsyncioTestCase):
     async def test_switch_agent_thread_resumes_selected_history(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
@@ -88,7 +104,7 @@ class AgentServiceTests(unittest.IsolatedAsyncioTestCase):
                 42, "main", "default", "thr-history"
             )
 
-            self.assertTrue(changed)
+            self.assertEqual(changed, "resumed")
             self.assertEqual(
                 state.get_agent(42, "main")["thread_id"], "thr-history"
             )
@@ -104,6 +120,38 @@ class AgentServiceTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(params["threadId"], "thr-history")
             self.assertEqual(params["model"], "gpt-test")
             self.assertEqual(params["sandbox"], "danger-full-access")
+
+    async def test_switch_agent_thread_forks_an_active_writer(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            state = StateStore(Path(temp) / "state.json")
+            state.ensure_default(42)
+            state.update_agent(42, "main", thread_id="thr-old")
+            config = SimpleNamespace(
+                max_parallel_turns=4,
+                default_account="default",
+                codex_model=None,
+                codex_cwd=Path(temp),
+                codex_sandbox="danger-full-access",
+            )
+            app = _ActiveWriterApp()
+            service = AgentService(config, state, {"default": app})
+
+            outcome = await service.switch_agent_thread(
+                42, "main", "default", "thr-active"
+            )
+
+            self.assertEqual(outcome, "forked")
+            self.assertEqual(
+                state.get_agent(42, "main")["thread_id"], "thr-forked"
+            )
+            self.assertEqual(
+                [method for method, _ in app.requests],
+                ["thread/resume", "thread/fork"],
+            )
+            self.assertIn(
+                ("default", "thr-forked"),
+                service._loaded_threads,  # noqa: SLF001
+            )
 
     async def test_switches_and_clears_agent_model(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
