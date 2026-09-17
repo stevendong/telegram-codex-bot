@@ -53,6 +53,31 @@ class _FailingFormattedTelegramAPI(_RecordingTelegramAPI):
 
 
 class TelegramAPITests(unittest.IsolatedAsyncioTestCase):
+    def test_command_menu_is_ordered_by_expected_usage_frequency(self) -> None:
+        self.assertEqual(
+            [item["command"] for item in BOT_COMMANDS],
+            [
+                "agents",
+                "models",
+                "status",
+                "threads",
+                "clear",
+                "stop",
+                "newagent",
+                "forkagent",
+                "accounts",
+                "reset",
+                "agent",
+                "model",
+                "renameagent",
+                "deleteagent",
+                "importagent",
+                "purgeagent",
+                "help",
+                "start",
+            ],
+        )
+
     async def test_configure_command_menu_for_private_chats(self) -> None:
         api = _RecordingTelegramAPI()
         await api.configure_command_menu(BOT_COMMANDS)

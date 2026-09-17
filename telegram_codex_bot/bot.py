@@ -15,24 +15,24 @@ from .telegram_api import TelegramAPI, TelegramError
 LOG = logging.getLogger(__name__)
 
 BOT_COMMANDS = [
-    {"command": "start", "description": "打开帮助"},
     {"command": "agents", "description": "查看并切换 Agent"},
-    {"command": "accounts", "description": "查看 Codex 登录账号"},
     {"command": "models", "description": "查看当前账号可用模型"},
-    {"command": "model", "description": "切换当前 Agent 模型"},
-    {"command": "agent", "description": "切换当前 Agent"},
-    {"command": "newagent", "description": "创建新 Agent"},
-    {"command": "forkagent", "description": "分叉当前 Agent"},
-    {"command": "renameagent", "description": "重命名 Agent"},
-    {"command": "deleteagent", "description": "移除 Agent 别名"},
-    {"command": "purgeagent", "description": "永久删除 Agent"},
-    {"command": "threads", "description": "查看账号历史会话"},
-    {"command": "importagent", "description": "导入已有会话"},
     {"command": "status", "description": "查看当前账号状态和额度"},
-    {"command": "reset", "description": "选择并使用 reset 重置卡"},
+    {"command": "threads", "description": "查看账号历史会话"},
     {"command": "clear", "description": "清除当前上下文并启动新会话"},
     {"command": "stop", "description": "停止 Agent 当前任务"},
+    {"command": "newagent", "description": "创建新 Agent"},
+    {"command": "forkagent", "description": "分叉当前 Agent"},
+    {"command": "accounts", "description": "查看 Codex 登录账号"},
+    {"command": "reset", "description": "选择并使用 reset 重置卡"},
+    {"command": "agent", "description": "切换当前 Agent"},
+    {"command": "model", "description": "切换当前 Agent 模型"},
+    {"command": "renameagent", "description": "重命名 Agent"},
+    {"command": "deleteagent", "description": "移除 Agent 别名"},
+    {"command": "importagent", "description": "导入已有会话"},
+    {"command": "purgeagent", "description": "永久删除 Agent"},
     {"command": "help", "description": "显示完整帮助"},
+    {"command": "start", "description": "打开帮助"},
 ]
 
 HELP = """Telegram Codex Bot
