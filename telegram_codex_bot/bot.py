@@ -427,14 +427,19 @@ class TelegramCodexBot:
         except TelegramError:
             LOG.debug("sendChatAction failed", exc_info=True)
         result = await self.service.run_turn(user_id, name, text)
-        prefix = f"[{name}]"
         if result.status == "completed":
-            await self.telegram.send_message(chat_id, f"{prefix}\n{result.text}")
+            await self.telegram.send_rich_markdown(
+                chat_id, f"## {name}\n\n{result.text}"
+            )
         elif result.status == "interrupted":
-            await self.telegram.send_message(chat_id, f"{prefix} 已中止\n{result.text}")
+            await self.telegram.send_rich_markdown(
+                chat_id, f"## {name} · 已中止\n\n{result.text}"
+            )
         else:
             detail = result.error or result.text
-            await self.telegram.send_message(chat_id, f"{prefix} 执行失败\n{detail}")
+            await self.telegram.send_rich_markdown(
+                chat_id, f"## {name} · 执行失败\n\n{detail}"
+            )
 
     async def _agent_picker(
         self, user_id: int

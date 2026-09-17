@@ -4,7 +4,7 @@ import unittest
 
 from telegram_codex_bot.agent_service import normalize_agent_name
 from telegram_codex_bot.bot import format_models, format_status, parse_command
-from telegram_codex_bot.telegram_api import split_text
+from telegram_codex_bot.telegram_api import split_rich_markdown, split_text
 
 
 class UtilityTests(unittest.TestCase):
@@ -22,6 +22,25 @@ class UtilityTests(unittest.TestCase):
         self.assertGreater(len(chunks), 1)
         self.assertTrue(all(len(chunk) <= 40 for chunk in chunks))
         self.assertEqual("".join(chunks).replace("\n", ""), ("first line" + "x" * 100))
+
+    def test_split_rich_markdown_keeps_code_fences_valid(self) -> None:
+        markdown = (
+            "# Result\n\n```python\n"
+            + "\n".join(f"print({index})" for index in range(30))
+            + "\n```"
+        )
+
+        chunks = split_rich_markdown(markdown, limit=100)
+
+        self.assertGreater(len(chunks), 1)
+        self.assertTrue(all(len(chunk) <= 100 for chunk in chunks))
+        code_chunks = [chunk for chunk in chunks if "print(" in chunk]
+        self.assertTrue(
+            all(
+                chunk.startswith("```python") and chunk.endswith("```")
+                for chunk in code_chunks
+            )
+        )
 
     def test_format_status_includes_current_account_quota(self) -> None:
         text = format_status(

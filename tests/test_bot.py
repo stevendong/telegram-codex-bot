@@ -91,6 +91,16 @@ class _FakeResetService(_FakeService):
         return "reset"
 
 
+class _FakeTurnService(_FakeService):
+    async def run_turn(self, user_id: int, name: str, text: str) -> Any:
+        self.turn = (user_id, name, text)
+        return SimpleNamespace(
+            status="completed",
+            text="# Summary\n\n**Rendered** response",
+            error=None,
+        )
+
+
 class _RecordingTelegramAPI(TelegramAPI):
     def __init__(self) -> None:
         super().__init__("test-token")
@@ -109,6 +119,38 @@ class _RecordingTelegramAPI(TelegramAPI):
 
 
 class BotCallbackTests(unittest.IsolatedAsyncioTestCase):
+    async def test_agent_response_uses_rich_markdown(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            state = StateStore(Path(temp) / "state.json")
+            state.ensure_default(42)
+            config = SimpleNamespace(
+                allowed_user_ids=frozenset({42}),
+                default_account="default",
+                codex_model=None,
+            )
+            service = _FakeTurnService()
+            telegram = _RecordingTelegramAPI()
+            bot = TelegramCodexBot(config, state, service, telegram)  # type: ignore[arg-type]
+
+            await bot._handle_update(  # noqa: SLF001
+                {
+                    "message": {
+                        "from": {"id": 42},
+                        "chat": {"id": 42, "type": "private"},
+                        "text": "do work",
+                    }
+                }
+            )
+
+            self.assertEqual(service.turn, (42, "main", "do work"))
+            self.assertEqual(
+                [method for method, _ in telegram.calls],
+                ["sendMessage", "sendChatAction", "sendRichMessage"],
+            )
+            rich_markdown = telegram.calls[-1][1]["rich_message"]["markdown"]
+            self.assertIn("## main", rich_markdown)
+            self.assertIn("**Rendered**", rich_markdown)
+
     async def test_agent_button_switches_and_refreshes_picker(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
             state = StateStore(Path(temp) / "state.json")
