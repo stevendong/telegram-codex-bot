@@ -14,6 +14,7 @@ from telegram_codex_bot.telegram_api import TelegramAPI
 class _FakeService:
     def __init__(self) -> None:
         self.usage_requests: list[str] = []
+        self.cleared: list[tuple[int, str]] = []
 
     def account_names(self) -> list[str]:
         return ["default"]
@@ -34,6 +35,10 @@ class _FakeService:
             },
             "secondary": {"usedPercent": 55, "windowDurationMins": 10080},
         }
+
+    async def clear_agent_context(self, user_id: int, name: str) -> bool:
+        self.cleared.append((user_id, name))
+        return True
 
 
 class _FakeModelService(_FakeService):
@@ -119,6 +124,33 @@ class _RecordingTelegramAPI(TelegramAPI):
 
 
 class BotCallbackTests(unittest.IsolatedAsyncioTestCase):
+    async def test_clear_command_starts_fresh_context_for_current_agent(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            state = StateStore(Path(temp) / "state.json")
+            state.ensure_default(42)
+            config = SimpleNamespace(
+                allowed_user_ids=frozenset({42}),
+                default_account="default",
+                codex_model=None,
+            )
+            service = _FakeService()
+            telegram = _RecordingTelegramAPI()
+            bot = TelegramCodexBot(config, state, service, telegram)  # type: ignore[arg-type]
+
+            await bot._handle_update(  # noqa: SLF001
+                {
+                    "message": {
+                        "from": {"id": 42},
+                        "chat": {"id": 42, "type": "private"},
+                        "text": "/clear",
+                    }
+                }
+            )
+
+            self.assertEqual(service.cleared, [(42, "main")])
+            self.assertEqual(telegram.calls[-1][0], "sendMessage")
+            self.assertIn("已启动全新会话", telegram.calls[-1][1]["text"])
+
     async def test_agent_response_uses_rich_markdown(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
             state = StateStore(Path(temp) / "state.json")

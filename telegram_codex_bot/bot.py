@@ -30,6 +30,7 @@ BOT_COMMANDS = [
     {"command": "importagent", "description": "导入已有会话"},
     {"command": "status", "description": "查看当前账号状态和额度"},
     {"command": "reset", "description": "选择并使用 reset 重置卡"},
+    {"command": "clear", "description": "清除当前上下文并启动新会话"},
     {"command": "stop", "description": "停止 Agent 当前任务"},
     {"command": "help", "description": "显示完整帮助"},
 ]
@@ -50,6 +51,7 @@ HELP = """Telegram Codex Bot
 /importagent <名称> <thread_id> [账号] — 导入已有 thread
 /status — 当前 Agent、Codex 登录及额度状态
 /reset — 选择当前账号的 reset 重置卡（二次确认）
+/clear — 清除当前 Agent 上下文并立即启动新会话
 /stop [名称] — 中止 Agent 当前任务
 /help — 显示帮助
 
@@ -407,6 +409,17 @@ class TelegramCodexBot:
             await self.telegram.send_message(
                 chat_id, text, reply_markup=markup
             )
+        elif command == "clear":
+            name = self.state.get_active_name(user_id)
+            had_context = await self.service.clear_agent_context(user_id, name)
+            if had_context:
+                message = (
+                    f"已清除 Agent {name} 的当前上下文；"
+                    "已启动全新会话。旧会话仍可通过 /threads 找回。"
+                )
+            else:
+                message = f"Agent {name} 已启动全新会话。"
+            await self.telegram.send_message(chat_id, message)
         elif command == "stop":
             name = normalize_agent_name(args[0]) if args else self.state.get_active_name(user_id)
             stopped = await self.service.stop_agent(user_id, name)

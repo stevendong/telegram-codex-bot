@@ -39,6 +39,7 @@
 /importagent <名称> <thread_id> [账号]
 /status  # 当前 Agent、Codex 登录和额度/重置时间
 /reset   # 选择当前账号的 reset 重置卡
+/clear   # 清除当前上下文并立即启动新会话
 /stop [名称]
 /help
 ```
@@ -48,6 +49,8 @@
 `/agents` 会在每个 Agent 下显示其账号的短期和长期剩余 Usage 及对应重置时间，并提供可直接点击的切换按钮；多个 Agent 属于同一账号时只查询一次额度。`/models` 会实时读取当前 Agent 所属账号可用的模型；`/model <模型ID>` 仍可用于文字切换，选择会持久化到当前 Agent，并从下一次任务起生效。`/model default` 可恢复账号默认模型。
 
 `/reset` 会读取当前 Agent 所属账号的可用重置卡。先选择卡片，再点击“确认使用”才会调用 Codex；卡片 ID 不会显示在 Telegram 中，选择按钮 10 分钟后失效。
+
+`/clear` 会解除当前 Agent 与现有 thread 的绑定，立即创建全新的 thread，并保留 Agent 名称、账号和模型。旧 thread 不会被删除，仍可通过 `/threads` 查看和重新导入；若新 thread 创建失败，原上下文保持不变。
 
 Agent 的最终回答优先通过 Telegram `sendRichMessage` 直接渲染 Rich Markdown，单条最多使用 30,000 字符并按 Markdown 块安全拆分；发送失败时自动降级为 HTML，再失败则发送纯文本，确保回答不会因格式错误而丢失。
 

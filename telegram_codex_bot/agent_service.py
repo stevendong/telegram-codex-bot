@@ -391,6 +391,38 @@ class AgentService:
         )
         return True
 
+    async def clear_agent_context(self, user_id: int, name: str) -> bool:
+        """Replace the current thread with a fresh session, preserving settings."""
+        name = normalize_agent_name(name)
+        lock = self._locks.setdefault((user_id, name), asyncio.Lock())
+        if lock.locked():
+            raise ValueError("Agent 正在运行，请完成或停止后再清除上下文")
+        async with lock:
+            agent = self.state.get_agent(user_id, name)
+            if not agent:
+                raise KeyError(name)
+            if agent.get("status") == "running":
+                raise ValueError("Agent 正在运行，请完成或停止后再清除上下文")
+            account = str(agent.get("account") or self.config.default_account)
+            old_thread_id = agent.get("thread_id")
+            app = self._app(account)
+            result = await app.request(
+                "thread/start", self._thread_params(agent.get("model"))
+            )
+            new_thread_id = str(result["thread"]["id"])
+            self.state.update_agent(
+                user_id,
+                name,
+                thread_id=new_thread_id,
+                status="idle",
+                active_turn_id=None,
+                last_error=None,
+            )
+            self._loaded_threads.add((account, new_thread_id))
+            if old_thread_id:
+                self._loaded_threads.discard((account, str(old_thread_id)))
+            return bool(old_thread_id)
+
     async def purge_agent(self, user_id: int, name: str) -> None:
         agent = self.state.get_agent(user_id, name)
         if not agent:

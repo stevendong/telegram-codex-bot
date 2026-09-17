@@ -58,6 +58,8 @@ class _FakeApp:
             }
         if method == "account/rateLimitResetCredit/consume":
             return {"outcome": "reset"}
+        if method == "thread/start":
+            return {"thread": {"id": "thr-new"}}
         raise AssertionError(f"Unexpected request: {method}")
 
 
@@ -133,3 +135,41 @@ class AgentServiceTests(unittest.IsolatedAsyncioTestCase):
             usage = await service.get_account_usage("default")
             self.assertEqual(usage["primary"]["usedPercent"], 80)
             self.assertEqual(app.requests[-1][0], "account/rateLimits/read")
+
+    async def test_clear_agent_context_detaches_thread_and_preserves_settings(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            state = StateStore(Path(temp) / "state.json")
+            state.ensure_default(42)
+            state.update_agent(
+                42,
+                "main",
+                thread_id="thr-old",
+                model="gpt-test",
+                last_error="old error",
+            )
+            config = SimpleNamespace(
+                max_parallel_turns=4,
+                default_account="default",
+                codex_model=None,
+                codex_cwd=Path(temp),
+                codex_sandbox="danger-full-access",
+            )
+            app = _FakeApp()
+            service = AgentService(config, state, {"default": app})
+            service._loaded_threads.add(("default", "thr-old"))  # noqa: SLF001
+
+            had_context = await service.clear_agent_context(42, "main")
+
+            self.assertTrue(had_context)
+            agent = state.get_agent(42, "main")
+            self.assertEqual(agent["thread_id"], "thr-new")
+            self.assertEqual(agent["model"], "gpt-test")
+            self.assertEqual(agent["account"], "default")
+            self.assertIsNone(agent["last_error"])
+            self.assertNotIn(
+                ("default", "thr-old"), service._loaded_threads  # noqa: SLF001
+            )
+            self.assertIn(
+                ("default", "thr-new"), service._loaded_threads  # noqa: SLF001
+            )
+            self.assertEqual(app.requests[-1][0], "thread/start")
