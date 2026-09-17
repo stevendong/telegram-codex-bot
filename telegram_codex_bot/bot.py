@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from datetime import UTC, datetime
 from typing import Any
 
 from .agent_service import AgentService, normalize_agent_name
@@ -23,7 +24,7 @@ HELP = """Telegram Codex Bot
 /purgeagent <名称> confirm — 永久删除 Codex thread
 /threads [账号] — 列出指定账号最近保存的 Codex threads
 /importagent <名称> <thread_id> [账号] — 导入已有 thread
-/status — 当前 Agent 状态
+/status — 当前 Agent、Codex 登录及额度状态
 /stop [名称] — 中止 Agent 当前任务
 /help — 显示帮助
 
@@ -191,11 +192,11 @@ class TelegramCodexBot:
         elif command == "status":
             name = self.state.get_active_name(user_id)
             agent = self.state.get_agent(user_id, name) or {}
-            thread_id = agent.get("thread_id") or "尚未创建"
+            account = str(agent.get("account") or self.config.default_account)
+            account_status = await self.service.get_account_status(account)
             await self.telegram.send_message(
                 chat_id,
-                f"当前 Agent：{name}\n账号：{agent.get('account', self.config.default_account)}"
-                f"\n状态：{agent.get('status', 'idle')}\nThread：{thread_id}",
+                format_status(name, agent, account_status),
             )
         elif command == "stop":
             name = normalize_agent_name(args[0]) if args else self.state.get_active_name(user_id)
@@ -278,3 +279,83 @@ class TelegramCodexBot:
     def _require_args(args: list[str], count: int, usage: str) -> None:
         if len(args) < count:
             raise ValueError(f"用法：{usage}")
+
+
+def format_status(
+    name: str,
+    agent: dict[str, Any],
+    account_status: dict[str, Any],
+) -> str:
+    account_name = str(
+        account_status.get("name") or agent.get("account") or "unknown"
+    )
+    thread_id = agent.get("thread_id") or "尚未创建"
+    lines = [
+        f"当前 Agent：{name}",
+        f"Codex 账号：{account_name}",
+        f"任务状态：{agent.get('status', 'idle')}",
+        f"Thread：{thread_id}",
+    ]
+
+    if not account_status.get("logged_in"):
+        lines.append("登录状态：未登录")
+        return "\n".join(lines)
+
+    account_type = {
+        "chatgpt": "ChatGPT",
+        "apiKey": "API Key",
+        "amazonBedrock": "Amazon Bedrock",
+    }.get(
+        str(account_status.get("type")),
+        str(account_status.get("type") or "未知"),
+    )
+    plan = account_status.get("plan_type")
+    login_detail = f"{account_type} / {plan}" if plan else account_type
+    lines.append(f"登录状态：已登录（{login_detail}）")
+
+    error = account_status.get("rate_limit_error")
+    if error:
+        lines.append(f"额度状态：查询失败（{str(error)[:160]}）")
+        return "\n".join(lines)
+
+    limits = account_status.get("rate_limits") or {}
+    reached_type = limits.get("rateLimitReachedType")
+    if reached_type:
+        reached_text = {
+            "rate_limit_reached": "已达到额度上限",
+            "workspace_owner_credits_depleted": "工作区所有者额度已耗尽",
+            "workspace_member_credits_depleted": "工作区成员额度已耗尽",
+            "workspace_owner_usage_limit_reached": "工作区所有者已达到用量上限",
+            "workspace_member_usage_limit_reached": "工作区成员已达到用量上限",
+        }.get(str(reached_type), str(reached_type))
+        lines.append(f"额度状态：{reached_text}")
+    elif limits:
+        lines.append("额度状态：可用")
+    else:
+        lines.append("额度状态：未返回额度信息")
+
+    for key, fallback_label in (("primary", "主要额度"), ("secondary", "次要额度")):
+        window = limits.get(key)
+        if not isinstance(window, dict):
+            continue
+        duration = window.get("windowDurationMins")
+        label = _rate_window_label(duration, fallback_label)
+        used = int(window.get("usedPercent", 0))
+        remaining = max(0, 100 - used)
+        line = f"{label}：已用 {used}%，剩余 {remaining}%"
+        resets_at = window.get("resetsAt")
+        if isinstance(resets_at, (int, float)):
+            reset_time = datetime.fromtimestamp(resets_at, UTC).astimezone()
+            line += f"，重置 {reset_time:%m-%d %H:%M}"
+        lines.append(line)
+    return "\n".join(lines)
+
+
+def _rate_window_label(duration: Any, fallback: str) -> str:
+    if not isinstance(duration, int) or duration <= 0:
+        return fallback
+    if duration % 1440 == 0:
+        return f"{duration // 1440} 天额度"
+    if duration % 60 == 0:
+        return f"{duration // 60} 小时额度"
+    return f"{duration} 分钟额度"

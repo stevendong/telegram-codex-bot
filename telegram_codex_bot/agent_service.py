@@ -76,6 +76,32 @@ class AgentService:
         except KeyError as exc:
             raise ValueError(f"未知 Codex 账号：{account}") from exc
 
+    async def get_account_status(self, account: str) -> dict[str, Any]:
+        """Return a privacy-safe login and quota snapshot for one Codex account."""
+        app = self._app(account)
+        account_response = await app.request(
+            "account/read", {"refreshToken": False}
+        )
+        account_data = account_response.get("account") or {}
+        status: dict[str, Any] = {
+            "name": account,
+            "logged_in": bool(account_data),
+            "type": account_data.get("type"),
+            "plan_type": account_data.get("planType"),
+            "rate_limits": {},
+            "rate_limit_error": None,
+        }
+        if not account_data:
+            return status
+        try:
+            rate_limit_response = await app.request(
+                "account/rateLimits/read", {}
+            )
+            status["rate_limits"] = rate_limit_response.get("rateLimits") or {}
+        except Exception as exc:
+            status["rate_limit_error"] = str(exc)
+        return status
+
     async def create_agent(
         self,
         user_id: int,

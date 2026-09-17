@@ -28,7 +28,7 @@
 /purgeagent <名称> confirm
 /threads [账号]
 /importagent <名称> <thread_id> [账号]
-/status
+/status  # 当前 Agent、Codex 登录和额度/重置时间
 /stop [名称]
 /help
 ```
