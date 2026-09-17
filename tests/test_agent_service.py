@@ -60,10 +60,51 @@ class _FakeApp:
             return {"outcome": "reset"}
         if method == "thread/start":
             return {"thread": {"id": "thr-new"}}
+        if method == "thread/resume":
+            return {"thread": {"id": params["threadId"]}}
         raise AssertionError(f"Unexpected request: {method}")
 
 
 class AgentServiceTests(unittest.IsolatedAsyncioTestCase):
+    async def test_switch_agent_thread_resumes_selected_history(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            state = StateStore(Path(temp) / "state.json")
+            state.ensure_default(42)
+            state.update_agent(
+                42, "main", thread_id="thr-old", model="gpt-test"
+            )
+            config = SimpleNamespace(
+                max_parallel_turns=4,
+                default_account="default",
+                codex_model=None,
+                codex_cwd=Path(temp),
+                codex_sandbox="danger-full-access",
+            )
+            app = _FakeApp()
+            service = AgentService(config, state, {"default": app})
+            service._loaded_threads.add(("default", "thr-old"))  # noqa: SLF001
+
+            changed = await service.switch_agent_thread(
+                42, "main", "default", "thr-history"
+            )
+
+            self.assertTrue(changed)
+            self.assertEqual(
+                state.get_agent(42, "main")["thread_id"], "thr-history"
+            )
+            self.assertNotIn(
+                ("default", "thr-old"), service._loaded_threads  # noqa: SLF001
+            )
+            self.assertIn(
+                ("default", "thr-history"),
+                service._loaded_threads,  # noqa: SLF001
+            )
+            method, params = app.requests[-1]
+            self.assertEqual(method, "thread/resume")
+            self.assertEqual(params["threadId"], "thr-history")
+            self.assertEqual(params["model"], "gpt-test")
+            self.assertEqual(params["sandbox"], "danger-full-access")
+
     async def test_switches_and_clears_agent_model(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
             state = StateStore(Path(temp) / "state.json")

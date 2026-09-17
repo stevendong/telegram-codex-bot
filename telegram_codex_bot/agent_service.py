@@ -302,6 +302,51 @@ class AgentService:
         )
         return list(result.get("data", []))
 
+    async def switch_agent_thread(
+        self,
+        user_id: int,
+        name: str,
+        account: str,
+        thread_id: str,
+    ) -> bool:
+        """Bind an Agent to an existing thread without deleting its old thread."""
+        name = normalize_agent_name(name)
+        lock = self._locks.setdefault((user_id, name), asyncio.Lock())
+        if lock.locked():
+            raise ValueError("Agent 正在运行，请完成或停止后再切换会话")
+        async with lock:
+            agent = self.state.get_agent(user_id, name)
+            if not agent:
+                raise KeyError(name)
+            if agent.get("status") == "running":
+                raise ValueError("Agent 正在运行，请完成或停止后再切换会话")
+            agent_account = str(
+                agent.get("account") or self.config.default_account
+            )
+            if agent_account != account:
+                raise ValueError("所选会话与目标 Agent 不属于同一 Codex 账号")
+            old_thread_id = agent.get("thread_id")
+            if str(old_thread_id or "") == thread_id:
+                return False
+            app = self._app(account)
+            params = {
+                "threadId": thread_id,
+                **self._thread_params(agent.get("model")),
+            }
+            await app.request("thread/resume", params)
+            self.state.update_agent(
+                user_id,
+                name,
+                thread_id=thread_id,
+                status="idle",
+                active_turn_id=None,
+                last_error=None,
+            )
+            self._loaded_threads.add((account, thread_id))
+            if old_thread_id:
+                self._loaded_threads.discard((account, str(old_thread_id)))
+            return True
+
     async def run_turn(self, user_id: int, name: str, text: str) -> TurnResult:
         name = normalize_agent_name(name)
         lock = self._locks.setdefault((user_id, name), asyncio.Lock())

@@ -81,6 +81,7 @@ class TelegramCodexBot:
         self.telegram = telegram
         self._tasks: set[asyncio.Task[None]] = set()
         self._reset_choices: dict[str, dict[str, Any]] = {}
+        self._thread_choices: dict[str, dict[str, Any]] = {}
 
     async def run(self, stop_event: asyncio.Event) -> None:
         offset = self.state.get_telegram_offset()
@@ -214,6 +215,22 @@ class TelegramCodexBot:
                 text, markup = await self._model_picker(user_id)
                 await self._edit_or_send(chat_id, message_id, text, markup)
                 await self._answer_callback(query_id, f"已切换模型：{model}")
+                return
+            if data.startswith("thread:"):
+                token = data.removeprefix("thread:")
+                choice = self._get_thread_choice(token, user_id)
+                name = str(choice["agent"])
+                account = str(choice["account"])
+                thread_id = str(choice["thread_id"])
+                await self.service.switch_agent_thread(
+                    user_id, name, account, thread_id
+                )
+                self.state.set_active(user_id, name)
+                text, markup = await self._thread_picker(user_id, account)
+                await self._edit_or_send(chat_id, message_id, text, markup)
+                await self._answer_callback(
+                    query_id, f"已切换到会话：{choice['label']}"
+                )
                 return
             if data.startswith("resetpick:"):
                 token = data.removeprefix("resetpick:")
@@ -381,9 +398,9 @@ class TelegramCodexBot:
             await self.telegram.send_message(chat_id, f"已永久删除 Agent：{name}")
         elif command == "threads":
             account = args[0].lower() if args else self._active_account(user_id)
-            threads = await self.service.list_server_threads(account)
+            text, markup = await self._thread_picker(user_id, account)
             await self.telegram.send_message(
-                chat_id, self._format_threads(account, threads)
+                chat_id, text, reply_markup=markup
             )
         elif command == "importagent":
             self._require_args(args, 2, "/importagent <名称> <thread_id> [账号]")
@@ -654,25 +671,146 @@ class TelegramCodexBot:
         agent = self.state.get_agent(user_id, name) or {}
         return str(agent.get("account") or self.config.default_account)
 
-    @staticmethod
-    def _format_threads(account: str, threads: list[dict[str, Any]]) -> str:
+    async def _thread_picker(
+        self, user_id: int, account: str
+    ) -> tuple[str, dict[str, Any]]:
+        self._prune_thread_choices()
+        target_name = self._thread_target_agent(user_id, account)
+        active_name, agents = self.state.list_agents(user_id)
+        threads = await self.service.list_server_threads(account)
+        old_tokens = [
+            token
+            for token, choice in self._thread_choices.items()
+            if choice.get("user_id") == user_id
+        ]
+        for token in old_tokens:
+            self._thread_choices.pop(token, None)
+        account_label = self.service.account_alias(account)
         if not threads:
-            return f"账号 {account} 没有可导入的 Codex thread。"
-        lines = [f"账号 {account} 最近的 Codex threads："]
-        for item in threads:
-            title = item.get("name") or item.get("preview") or "未命名"
-            title = " ".join(str(title).split())[:70]
+            return (
+                f"账号 {account_label} 没有可切换的 Codex thread。",
+                {"inline_keyboard": []},
+            )
+        lines = [
+            "会话切换",
+            f"账号：{account_label}",
+            f"未绑定的会话将连接到 Agent：{target_name}",
+            "\n点击按钮即可切换；旧会话不会被删除：",
+        ]
+        buttons: list[list[dict[str, str]]] = []
+        for index, item in enumerate(threads, start=1):
+            thread_id = str(item.get("id") or "").strip()
+            if not thread_id:
+                continue
+            title = _single_line(
+                item.get("name") or item.get("preview") or "未命名", 70
+            )
             status_obj = item.get("status") or {}
-            status = status_obj.get("type") if isinstance(status_obj, dict) else status_obj
-            lines.extend(
+            status = (
+                status_obj.get("type")
+                if isinstance(status_obj, dict)
+                else status_obj
+            )
+            bound_name = next(
+                (
+                    name
+                    for name, agent in agents.items()
+                    if str(
+                        agent.get("account") or self.config.default_account
+                    )
+                    == account
+                    and str(agent.get("thread_id") or "") == thread_id
+                ),
+                None,
+            )
+            choice_agent = bound_name or target_name
+            selected = (
+                choice_agent == active_name
+                and thread_id
+                == str((agents.get(choice_agent) or {}).get("thread_id") or "")
+            )
+            marker = "✅" if selected else f"{index}."
+            binding = f" · Agent {bound_name}" if bound_name else ""
+            lines.append(
+                f"{marker} {title} · {status or 'unknown'}{binding}"
+            )
+            lines.append(f"   ID：{thread_id}")
+            if selected:
+                callback_data = "noop"
+            else:
+                token = self._store_thread_choice(
+                    user_id=user_id,
+                    agent=choice_agent,
+                    account=account,
+                    thread_id=thread_id,
+                    label=title,
+                )
+                callback_data = f"thread:{token}"
+            buttons.append(
                 [
-                    f"\n{title}",
-                    f"状态：{status or 'unknown'}",
-                    f"ID：{item.get('id')}",
+                    {
+                        "text": f"{'✅ ' if selected else ''}{index}. {title[:48]}",
+                        "callback_data": callback_data,
+                    }
                 ]
             )
-        lines.append(f"\n导入：/importagent <名称> <ID> {account}")
-        return "\n".join(lines)
+        return "\n".join(lines), {"inline_keyboard": buttons}
+
+    def _thread_target_agent(self, user_id: int, account: str) -> str:
+        active_name, agents = self.state.list_agents(user_id)
+        if active_name:
+            active = agents.get(active_name) or {}
+            if str(active.get("account") or self.config.default_account) == account:
+                return active_name
+        for name, agent in agents.items():
+            if (
+                str(agent.get("account") or self.config.default_account) == account
+                and agent.get("account_primary") is True
+            ):
+                return name
+        for name, agent in agents.items():
+            if str(agent.get("account") or self.config.default_account) == account:
+                return name
+        raise ValueError(f"账号 {account} 没有可用于切换会话的 Agent")
+
+    def _store_thread_choice(
+        self,
+        *,
+        user_id: int,
+        agent: str,
+        account: str,
+        thread_id: str,
+        label: str,
+    ) -> str:
+        token = secrets.token_urlsafe(9)
+        while token in self._thread_choices:
+            token = secrets.token_urlsafe(9)
+        self._thread_choices[token] = {
+            "user_id": user_id,
+            "agent": agent,
+            "account": account,
+            "thread_id": thread_id,
+            "label": label,
+            "created_monotonic": time.monotonic(),
+        }
+        return token
+
+    def _prune_thread_choices(self) -> None:
+        cutoff = time.monotonic() - 600
+        expired = [
+            token
+            for token, choice in self._thread_choices.items()
+            if float(choice.get("created_monotonic", 0)) < cutoff
+        ]
+        for token in expired:
+            self._thread_choices.pop(token, None)
+
+    def _get_thread_choice(self, token: str, user_id: int) -> dict[str, Any]:
+        self._prune_thread_choices()
+        choice = self._thread_choices.get(token)
+        if not choice or choice.get("user_id") != user_id:
+            raise ValueError("会话按钮已过期，请重新发送 /threads")
+        return choice
 
     @staticmethod
     def _require_args(args: list[str], count: int, usage: str) -> None:

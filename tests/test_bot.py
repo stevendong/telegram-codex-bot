@@ -106,6 +106,41 @@ class _FakeTurnService(_FakeService):
         )
 
 
+class _FakeThreadService(_FakeService):
+    def __init__(self, state: StateStore) -> None:
+        super().__init__()
+        self.state = state
+        self.switched: list[tuple[int, str, str, str]] = []
+
+    async def list_server_threads(
+        self, account: str, limit: int = 15
+    ) -> list[dict[str, Any]]:
+        del account, limit
+        return [
+            {
+                "id": "thr-current",
+                "name": "Current session",
+                "status": {"type": "idle"},
+            },
+            {
+                "id": "thr-history",
+                "name": "Historical build session",
+                "status": {"type": "idle"},
+            },
+        ]
+
+    async def switch_agent_thread(
+        self,
+        user_id: int,
+        name: str,
+        account: str,
+        thread_id: str,
+    ) -> bool:
+        self.switched.append((user_id, name, account, thread_id))
+        self.state.update_agent(user_id, name, thread_id=thread_id)
+        return True
+
+
 class _RecordingTelegramAPI(TelegramAPI):
     def __init__(self) -> None:
         super().__init__("test-token")
@@ -124,6 +159,62 @@ class _RecordingTelegramAPI(TelegramAPI):
 
 
 class BotCallbackTests(unittest.IsolatedAsyncioTestCase):
+    async def test_threads_command_switches_history_with_button(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            state = StateStore(Path(temp) / "state.json")
+            state.ensure_default(42)
+            state.update_agent(42, "main", thread_id="thr-current")
+            config = SimpleNamespace(
+                allowed_user_ids=frozenset({42}),
+                default_account="default",
+                codex_model=None,
+            )
+            service = _FakeThreadService(state)
+            telegram = _RecordingTelegramAPI()
+            bot = TelegramCodexBot(config, state, service, telegram)  # type: ignore[arg-type]
+
+            await bot._handle_update(  # noqa: SLF001
+                {
+                    "message": {
+                        "from": {"id": 42},
+                        "chat": {"id": 42, "type": "private"},
+                        "text": "/threads",
+                    }
+                }
+            )
+
+            picker = telegram.calls[-1][1]
+            self.assertIn("点击按钮即可切换", picker["text"])
+            buttons = picker["reply_markup"]["inline_keyboard"]
+            self.assertEqual(buttons[0][0]["callback_data"], "noop")
+            callback_data = buttons[1][0]["callback_data"]
+            self.assertTrue(callback_data.startswith("thread:"))
+            self.assertLessEqual(len(callback_data.encode()), 64)
+
+            await bot._handle_update(  # noqa: SLF001
+                {
+                    "callback_query": {
+                        "id": "query-thread",
+                        "from": {"id": 42},
+                        "message": {
+                            "message_id": 10,
+                            "chat": {"id": 42, "type": "private"},
+                        },
+                        "data": callback_data,
+                    }
+                }
+            )
+
+            self.assertEqual(
+                service.switched,
+                [(42, "main", "default", "thr-history")],
+            )
+            self.assertEqual(state.get_agent(42, "main")["thread_id"], "thr-history")
+            self.assertEqual(
+                [method for method, _ in telegram.calls[-2:]],
+                ["editMessageText", "answerCallbackQuery"],
+            )
+
     async def test_clear_command_starts_fresh_context_for_current_agent(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
             state = StateStore(Path(temp) / "state.json")
