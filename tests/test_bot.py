@@ -1,10 +1,12 @@
 from __future__ import annotations
 
+import asyncio
 import tempfile
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
+from unittest.mock import patch
 
 from telegram_codex_bot.bot import TelegramCodexBot
 from telegram_codex_bot.state import StateStore
@@ -142,6 +144,40 @@ class _FakeThreadService(_FakeService):
         return self.switch_outcome
 
 
+class _FakeProgressService(_FakeService):
+    def __init__(self) -> None:
+        super().__init__()
+        self.started = asyncio.Event()
+        self.finished = asyncio.Event()
+        self.stop_requests: list[tuple[int, str]] = []
+
+    async def run_turn(self, user_id: int, name: str, text: str) -> Any:
+        self.turn = (user_id, name, text)
+        self.started.set()
+        await self.finished.wait()
+        return SimpleNamespace(
+            status="interrupted",
+            text="任务已中止。",
+            error=None,
+        )
+
+    def get_turn_progress(self, user_id: int, name: str) -> dict[str, Any]:
+        del user_id, name
+        return {
+            "stage": "正在执行命令",
+            "detail": "/data/project",
+            "completed_items": 2,
+            "plan_completed": 1,
+            "plan_total": 3,
+            "elapsed_seconds": 12,
+        }
+
+    async def stop_agent(self, user_id: int, name: str) -> bool:
+        self.stop_requests.append((user_id, name))
+        self.finished.set()
+        return True
+
+
 class _RecordingTelegramAPI(TelegramAPI):
     def __init__(self) -> None:
         super().__init__("test-token")
@@ -159,7 +195,97 @@ class _RecordingTelegramAPI(TelegramAPI):
         return True
 
 
+class _ProgressTelegramAPI(_RecordingTelegramAPI):
+    async def call(
+        self,
+        method: str,
+        payload: dict[str, Any] | None = None,
+        *,
+        timeout: int = 70,
+    ) -> Any:
+        await super().call(method, payload, timeout=timeout)
+        if method == "sendMessage":
+            return {"message_id": 99}
+        return True
+
+
 class BotCallbackTests(unittest.IsolatedAsyncioTestCase):
+    async def test_progress_card_updates_and_interrupt_button_stops_turn(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            state = StateStore(Path(temp) / "state.json")
+            state.ensure_default(42)
+            config = SimpleNamespace(
+                allowed_user_ids=frozenset({42}),
+                default_account="default",
+                codex_model=None,
+            )
+            service = _FakeProgressService()
+            telegram = _ProgressTelegramAPI()
+            bot = TelegramCodexBot(config, state, service, telegram)  # type: ignore[arg-type]
+            prompt_update = {
+                "message": {
+                    "from": {"id": 42},
+                    "chat": {"id": 42, "type": "private"},
+                    "text": "long task",
+                }
+            }
+
+            with patch(
+                "telegram_codex_bot.bot.PROGRESS_UPDATE_SECONDS", 0.01
+            ):
+                prompt_task = asyncio.create_task(
+                    bot._handle_update(prompt_update)  # noqa: SLF001
+                )
+                await asyncio.wait_for(service.started.wait(), timeout=1)
+                await asyncio.sleep(0.03)
+
+                initial = next(
+                    payload
+                    for method, payload in telegram.calls
+                    if method == "sendMessage"
+                )
+                stop_button = initial["reply_markup"]["inline_keyboard"][0][0]
+                self.assertEqual(stop_button["callback_data"], "stop:main")
+                progress_edits = [
+                    payload
+                    for method, payload in telegram.calls
+                    if method == "editMessageText"
+                    and "计划进度：1/3" in payload.get("text", "")
+                ]
+                self.assertTrue(progress_edits)
+
+                await bot._handle_update(  # noqa: SLF001
+                    {
+                        "callback_query": {
+                            "id": "query-stop",
+                            "from": {"id": 42},
+                            "message": {
+                                "message_id": 99,
+                                "text": progress_edits[-1]["text"],
+                                "chat": {"id": 42, "type": "private"},
+                            },
+                            "data": stop_button["callback_data"],
+                        }
+                    }
+                )
+                await asyncio.wait_for(prompt_task, timeout=1)
+
+            self.assertEqual(service.stop_requests, [(42, "main")])
+            self.assertTrue(
+                any(
+                    method == "answerCallbackQuery"
+                    and "已请求中断" in payload.get("text", "")
+                    for method, payload in telegram.calls
+                )
+            )
+            self.assertTrue(
+                any(
+                    method == "editMessageText"
+                    and "任务已中止" in payload.get("text", "")
+                    for method, payload in telegram.calls
+                )
+            )
+
     async def test_threads_command_switches_history_with_button(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
             state = StateStore(Path(temp) / "state.json")

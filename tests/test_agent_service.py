@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import tempfile
 import unittest
 from pathlib import Path
@@ -81,7 +82,119 @@ class _ActiveWriterApp(_FakeApp):
         return await super().request(method, params)
 
 
+class _InteractiveApp(_FakeApp):
+    def __init__(self) -> None:
+        super().__init__()
+        self.handler: Any = None
+
+    def add_notification_handler(self, handler: Any) -> None:
+        self.handler = handler
+
+    def emit(self, method: str, params: dict[str, Any]) -> None:
+        self.handler(method, params)
+
+    async def request(
+        self, method: str, params: dict[str, Any]
+    ) -> dict[str, Any]:
+        self.requests.append((method, params))
+        if method == "thread/start":
+            return {"thread": {"id": "thr-run"}}
+        if method == "turn/start":
+            return {"turn": {"id": "turn-run"}}
+        if method == "turn/interrupt":
+            self.emit(
+                "turn/completed",
+                {
+                    "threadId": "thr-run",
+                    "turn": {"id": "turn-run", "status": "interrupted"},
+                },
+            )
+            return {}
+        raise AssertionError(f"Unexpected request: {method}")
+
+
 class AgentServiceTests(unittest.IsolatedAsyncioTestCase):
+    async def test_reports_progress_and_interrupts_active_turn(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            state = StateStore(Path(temp) / "state.json")
+            state.ensure_default(42)
+            config = SimpleNamespace(
+                max_parallel_turns=4,
+                default_account="default",
+                codex_model=None,
+                codex_cwd=Path(temp),
+                codex_sandbox="danger-full-access",
+                turn_timeout_seconds=30,
+            )
+            app = _InteractiveApp()
+            service = AgentService(config, state, {"default": app})
+
+            task = asyncio.create_task(service.run_turn(42, "main", "work"))
+            for _ in range(100):
+                if state.get_agent(42, "main").get("active_turn_id"):
+                    break
+                await asyncio.sleep(0)
+            else:
+                self.fail("turn did not start")
+
+            app.emit(
+                "turn/plan/updated",
+                {
+                    "turnId": "turn-run",
+                    "plan": [
+                        {"step": "Inspect files", "status": "completed"},
+                        {"step": "Run tests", "status": "inProgress"},
+                    ],
+                },
+            )
+            app.emit(
+                "item/started",
+                {
+                    "threadId": "thr-run",
+                    "item": {
+                        "type": "commandExecution",
+                        "cwd": "/data/project",
+                    },
+                },
+            )
+            app.emit(
+                "item/completed",
+                {
+                    "threadId": "thr-run",
+                    "item": {"type": "commandExecution"},
+                },
+            )
+            app.emit(
+                "item/completed",
+                {
+                    "threadId": "thr-run",
+                    "item": {
+                        "type": "agentMessage",
+                        "phase": "commentary",
+                        "text": "I checked the files and am running tests.",
+                    },
+                },
+            )
+
+            progress = service.get_turn_progress(42, "main")
+            self.assertIsNotNone(progress)
+            self.assertEqual(progress["plan_completed"], 1)
+            self.assertEqual(progress["plan_total"], 2)
+            self.assertEqual(progress["completed_items"], 2)
+            self.assertEqual(progress["stage"], "Codex 进度更新")
+            self.assertIn("running tests", progress["detail"])
+
+            stopped = await service.stop_agent(42, "main")
+            stopping = service.get_turn_progress(42, "main")
+            result = await asyncio.wait_for(task, timeout=1)
+
+            self.assertTrue(stopped)
+            self.assertEqual(stopping["stage"], "正在中断任务")
+            self.assertEqual(result.status, "interrupted")
+            self.assertNotIn("running tests", result.text)
+            self.assertIsNone(service.get_turn_progress(42, "main"))
+            self.assertEqual(app.requests[-1][0], "turn/interrupt")
+
     async def test_switch_agent_thread_resumes_selected_history(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
             state = StateStore(Path(temp) / "state.json")

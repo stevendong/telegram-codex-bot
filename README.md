@@ -11,6 +11,8 @@
 - 查看、选择并使用账号可用的 reset 重置卡（二次确认）
 - 每个 Agent 保留独立上下文
 - Agent 回答使用 Telegram Rich Markdown 渲染标题、列表、代码、表格和公式
+- 任务状态卡持续显示运行时长、当前阶段、事件数和计划完成度
+- 状态卡提供可点击的中断按钮，同时支持 `/stop [名称]`
 - 发现并导入服务器已有 Codex threads
 - 不同 Agent 可以并行运行
 - Telegram 用户 ID 白名单

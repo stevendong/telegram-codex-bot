@@ -52,7 +52,28 @@ class _FailingFormattedTelegramAPI(_RecordingTelegramAPI):
         return result
 
 
+class _MessageResultTelegramAPI(_RecordingTelegramAPI):
+    async def call(
+        self,
+        method: str,
+        payload: dict[str, Any] | None = None,
+        *,
+        timeout: int = 70,
+    ) -> Any:
+        await super().call(method, payload, timeout=timeout)
+        if method == "sendMessage":
+            return {"message_id": 321}
+        return True
+
+
 class TelegramAPITests(unittest.IsolatedAsyncioTestCase):
+    async def test_send_message_returns_telegram_message_id(self) -> None:
+        api = _MessageResultTelegramAPI()
+
+        message_id = await api.send_message(10, "Progress")
+
+        self.assertEqual(message_id, 321)
+
     def test_command_menu_is_ordered_by_expected_usage_frequency(self) -> None:
         self.assertEqual(
             [item["command"] for item in BOT_COMMANDS],

@@ -287,8 +287,9 @@ class TelegramAPI:
         text: str,
         *,
         reply_markup: dict[str, Any] | None = None,
-    ) -> None:
+    ) -> int | None:
         chunks = split_text(text)
+        last_message_id: int | None = None
         for index, chunk in enumerate(chunks):
             payload: dict[str, Any] = {
                 "chat_id": chat_id,
@@ -297,10 +298,15 @@ class TelegramAPI:
             }
             if reply_markup is not None and index == len(chunks) - 1:
                 payload["reply_markup"] = reply_markup
-            await self.call(
+            result = await self.call(
                 "sendMessage",
                 payload,
             )
+            if isinstance(result, dict) and isinstance(
+                result.get("message_id"), int
+            ):
+                last_message_id = result["message_id"]
+        return last_message_id
 
     async def send_rich_markdown(self, chat_id: int, markdown: str) -> None:
         for chunk in split_rich_markdown(markdown):

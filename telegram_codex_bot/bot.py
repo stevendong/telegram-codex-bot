@@ -13,6 +13,7 @@ from .state import StateStore
 from .telegram_api import TelegramAPI, TelegramError
 
 LOG = logging.getLogger(__name__)
+PROGRESS_UPDATE_SECONDS = 8
 
 BOT_COMMANDS = [
     {"command": "agents", "description": "查看并切换 Agent"},
@@ -65,6 +66,17 @@ def parse_command(text: str) -> tuple[str, list[str]] | None:
     parts = stripped.split()
     command = parts[0][1:].split("@", 1)[0].lower()
     return command, parts[1:]
+
+
+def _format_duration(seconds: int) -> str:
+    seconds = max(0, seconds)
+    hours, remainder = divmod(seconds, 3600)
+    minutes, secs = divmod(remainder, 60)
+    if hours:
+        return f"{hours} 小时 {minutes:02d} 分"
+    if minutes:
+        return f"{minutes} 分 {secs:02d} 秒"
+    return f"{secs} 秒"
 
 
 class TelegramCodexBot:
@@ -233,6 +245,23 @@ class TelegramCodexBot:
                 else:
                     answer = f"已切换到会话：{choice['label']}"
                 await self._answer_callback(query_id, answer)
+                return
+            if data.startswith("stop:"):
+                name = normalize_agent_name(data.removeprefix("stop:"))
+                stopped = await self.service.stop_agent(user_id, name)
+                if stopped:
+                    current_text = str(message.get("text") or f"Agent {name} 正在运行")
+                    if "正在请求中断" not in current_text:
+                        current_text += "\n\n⏹ 正在请求中断……"
+                    await self._edit_or_send(
+                        chat_id,
+                        message_id,
+                        current_text,
+                        {"inline_keyboard": []},
+                    )
+                    await self._answer_callback(query_id, f"已请求中断 Agent：{name}")
+                else:
+                    await self._answer_callback(query_id, f"Agent {name} 当前没有运行任务")
                 return
             if data.startswith("resetpick:"):
                 token = data.removeprefix("resetpick:")
@@ -451,14 +480,91 @@ class TelegramCodexBot:
         name = self.state.get_active_name(user_id)
         agent = self.state.get_agent(user_id, name) or {}
         if agent.get("status") == "running":
-            await self.telegram.send_message(chat_id, f"Agent {name} 正在运行；这条消息已排队。")
+            initial_text = f"⏳ Agent {name} 正在运行；这条消息已排队。"
         else:
-            await self.telegram.send_message(chat_id, f"⏳ Agent {name} 已接收任务。")
+            initial_text = f"⏳ Agent {name} 已接收任务，正在启动 Codex。"
+        stop_markup = {
+            "inline_keyboard": [
+                [
+                    {
+                        "text": "⏹ 中断任务",
+                        "callback_data": f"stop:{name}",
+                    }
+                ]
+            ]
+        }
+        status_message_id = await self.telegram.send_message(
+            chat_id, initial_text, reply_markup=stop_markup
+        )
         try:
             await self.telegram.send_typing(chat_id)
         except TelegramError:
             LOG.debug("sendChatAction failed", exc_info=True)
-        result = await self.service.run_turn(user_id, name, text)
+        started_monotonic = time.monotonic()
+        turn_task = asyncio.create_task(
+            self.service.run_turn(user_id, name, text)
+        )
+        try:
+            while not turn_task.done():
+                done, _ = await asyncio.wait(
+                    {turn_task}, timeout=PROGRESS_UPDATE_SECONDS
+                )
+                if done:
+                    break
+                progress = self.service.get_turn_progress(user_id, name)
+                if status_message_id is not None and progress:
+                    await self._update_progress_message(
+                        chat_id,
+                        status_message_id,
+                        name,
+                        progress,
+                        stop_markup,
+                    )
+                try:
+                    await self.telegram.send_typing(chat_id)
+                except TelegramError:
+                    LOG.debug("sendChatAction refresh failed", exc_info=True)
+            result = await turn_task
+        except Exception:
+            if not turn_task.done():
+                turn_task.cancel()
+                await asyncio.gather(turn_task, return_exceptions=True)
+            if status_message_id is not None:
+                try:
+                    await self.telegram.edit_message_text(
+                        chat_id,
+                        status_message_id,
+                        (
+                            "❌ 任务执行失败\n"
+                            f"Agent：{name}\n"
+                            f"耗时：{_format_duration(int(time.monotonic() - started_monotonic))}"
+                        ),
+                        reply_markup={"inline_keyboard": []},
+                    )
+                except TelegramError:
+                    LOG.warning("Could not mark progress message failed", exc_info=True)
+            raise
+        except BaseException:
+            if not turn_task.done():
+                turn_task.cancel()
+                await asyncio.gather(turn_task, return_exceptions=True)
+            raise
+
+        elapsed = max(0, int(time.monotonic() - started_monotonic))
+        if status_message_id is not None:
+            final_status = {
+                "completed": "✅ 任务已完成",
+                "interrupted": "⏹ 任务已中止",
+            }.get(result.status, "❌ 任务执行失败")
+            try:
+                await self.telegram.edit_message_text(
+                    chat_id,
+                    status_message_id,
+                    f"{final_status}\nAgent：{name}\n耗时：{_format_duration(elapsed)}",
+                    reply_markup={"inline_keyboard": []},
+                )
+            except TelegramError:
+                LOG.warning("Could not finalize progress message", exc_info=True)
         if result.status == "completed":
             await self.telegram.send_rich_markdown(
                 chat_id, f"## {name}\n\n{result.text}"
@@ -472,6 +578,40 @@ class TelegramCodexBot:
             await self.telegram.send_rich_markdown(
                 chat_id, f"## {name} · 执行失败\n\n{detail}"
             )
+
+    async def _update_progress_message(
+        self,
+        chat_id: int,
+        message_id: int,
+        name: str,
+        progress: dict[str, Any],
+        reply_markup: dict[str, Any],
+    ) -> None:
+        lines = [
+            "⏳ 任务执行中",
+            f"Agent：{name}",
+            f"阶段：{progress.get('stage') or '正在处理'}",
+        ]
+        detail = progress.get("detail")
+        if detail:
+            lines.append(f"当前：{detail}")
+        plan_total = int(progress.get("plan_total") or 0)
+        if plan_total:
+            plan_completed = int(progress.get("plan_completed") or 0)
+            lines.append(f"计划进度：{plan_completed}/{plan_total}")
+        lines.append(f"已完成事件：{int(progress.get('completed_items') or 0)}")
+        lines.append(
+            f"已运行：{_format_duration(int(progress.get('elapsed_seconds') or 0))}"
+        )
+        try:
+            await self.telegram.edit_message_text(
+                chat_id,
+                message_id,
+                "\n".join(lines),
+                reply_markup=reply_markup,
+            )
+        except TelegramError:
+            LOG.warning("Could not update progress message", exc_info=True)
 
     async def _agent_picker(
         self, user_id: int

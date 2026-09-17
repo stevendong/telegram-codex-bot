@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import re
+import time
 import uuid
 from dataclasses import dataclass, field
 from typing import Any
@@ -36,6 +37,13 @@ class _TurnRun:
     final_messages: list[str] = field(default_factory=list)
     deltas: list[str] = field(default_factory=list)
     error: str | None = None
+    started_monotonic: float = field(default_factory=time.monotonic)
+    stage: str = "正在启动 Codex"
+    detail: str | None = None
+    completed_items: int = 0
+    plan_completed: int = 0
+    plan_total: int = 0
+    stop_requested: bool = False
 
 
 class AgentService:
@@ -56,6 +64,7 @@ class AgentService:
             )
         self._loaded_threads: set[tuple[str, str]] = set()
         self._runs: dict[tuple[str, str], _TurnRun] = {}
+        self._agent_runs: dict[tuple[int, str], _TurnRun] = {}
         self._locks: dict[tuple[int, str], asyncio.Lock] = {}
         self._semaphore = asyncio.Semaphore(config.max_parallel_turns)
         self._account_aliases = {name: name for name in apps}
@@ -360,12 +369,10 @@ class AgentService:
         name = normalize_agent_name(name)
         lock = self._locks.setdefault((user_id, name), asyncio.Lock())
         async with lock, self._semaphore:
-            account, thread_id = await self._ensure_thread(user_id, name)
-            app = self._app(account)
-            agent = self.state.get_agent(user_id, name) or {}
             loop = asyncio.get_running_loop()
             run = _TurnRun(done=loop.create_future())
-            self._runs[(account, thread_id)] = run
+            agent_key = (user_id, name)
+            self._agent_runs[agent_key] = run
             self.state.update_agent(
                 user_id,
                 name,
@@ -373,7 +380,13 @@ class AgentService:
                 active_turn_id=None,
                 last_error=None,
             )
+            account: str | None = None
+            thread_id: str | None = None
             try:
+                account, thread_id = await self._ensure_thread(user_id, name)
+                app = self._app(account)
+                agent = self.state.get_agent(user_id, name) or {}
+                self._runs[(account, thread_id)] = run
                 turn_params: dict[str, Any] = {
                     "threadId": thread_id,
                     "input": [{"type": "text", "text": text}],
@@ -384,6 +397,11 @@ class AgentService:
                 response = await app.request("turn/start", turn_params)
                 run.turn_id = str(response["turn"]["id"])
                 self.state.update_agent(user_id, name, active_turn_id=run.turn_id)
+                if run.stop_requested:
+                    await app.request(
+                        "turn/interrupt",
+                        {"threadId": thread_id, "turnId": run.turn_id},
+                    )
                 completed = await asyncio.wait_for(
                     asyncio.shield(run.done),
                     timeout=self.config.turn_timeout_seconds,
@@ -405,7 +423,7 @@ class AgentService:
                 )
                 return TurnResult(status=status, text=text_result, error=error)
             except TimeoutError:
-                if run.turn_id:
+                if account and thread_id and run.turn_id:
                     await app.request(
                         "turn/interrupt",
                         {"threadId": thread_id, "turnId": run.turn_id},
@@ -429,16 +447,44 @@ class AgentService:
                 )
                 raise
             finally:
-                self._runs.pop((account, thread_id), None)
+                if account and thread_id:
+                    self._runs.pop((account, thread_id), None)
+                if self._agent_runs.get(agent_key) is run:
+                    self._agent_runs.pop(agent_key, None)
+
+    def get_turn_progress(
+        self, user_id: int, name: str
+    ) -> dict[str, Any] | None:
+        run = self._agent_runs.get((user_id, normalize_agent_name(name)))
+        if not run:
+            return None
+        return {
+            "stage": run.stage,
+            "detail": run.detail,
+            "completed_items": run.completed_items,
+            "plan_completed": run.plan_completed,
+            "plan_total": run.plan_total,
+            "elapsed_seconds": max(0, int(time.monotonic() - run.started_monotonic)),
+            "stop_requested": run.stop_requested,
+        }
 
     async def stop_agent(self, user_id: int, name: str) -> bool:
+        name = normalize_agent_name(name)
         agent = self.state.get_agent(user_id, name)
         if not agent:
             raise KeyError(name)
-        thread_id = agent.get("thread_id")
-        turn_id = agent.get("active_turn_id")
-        if not thread_id or not turn_id:
+        run = self._agent_runs.get((user_id, name))
+        if not run or run.done.done():
             return False
+        if run.stop_requested:
+            return True
+        run.stop_requested = True
+        run.stage = "正在中断任务"
+        run.detail = None
+        thread_id = agent.get("thread_id")
+        turn_id = run.turn_id or agent.get("active_turn_id")
+        if not thread_id or not turn_id:
+            return True
         account = str(agent.get("account") or self.config.default_account)
         await self._app(account).request(
             "turn/interrupt", {"threadId": thread_id, "turnId": turn_id}
@@ -516,21 +562,120 @@ class AgentService:
         self, account: str, method: str, params: dict[str, Any]
     ) -> None:
         thread_id = params.get("threadId")
-        if not thread_id:
-            return
-        run = self._runs.get((account, str(thread_id)))
+        run = (
+            self._runs.get((account, str(thread_id)))
+            if thread_id
+            else None
+        )
+        if not run:
+            turn = params.get("turn") or {}
+            turn_id = params.get("turnId") or (
+                turn.get("id") if isinstance(turn, dict) else None
+            )
+            if turn_id:
+                run = next(
+                    (
+                        candidate
+                        for (run_account, _), candidate in self._runs.items()
+                        if run_account == account
+                        and candidate.turn_id == str(turn_id)
+                    ),
+                    None,
+                )
         if not run:
             return
         if method == "item/agentMessage/delta":
             delta = params.get("delta")
             if isinstance(delta, str):
                 run.deltas.append(delta)
+        elif method == "turn/started":
+            run.stage = "正在分析任务"
+            run.detail = None
+        elif method == "turn/plan/updated":
+            plan = params.get("plan") or []
+            if isinstance(plan, list):
+                run.plan_total = len(plan)
+                run.plan_completed = sum(
+                    1
+                    for step in plan
+                    if isinstance(step, dict)
+                    and step.get("status") == "completed"
+                )
+                active_step = next(
+                    (
+                        step.get("step")
+                        for step in plan
+                        if isinstance(step, dict)
+                        and step.get("status") == "inProgress"
+                    ),
+                    None,
+                )
+                run.stage = "正在执行计划"
+                run.detail = _progress_detail(active_step)
+        elif method == "item/started":
+            item = params.get("item") or {}
+            run.stage, run.detail = _item_progress(item)
         elif method == "item/completed":
             item = params.get("item") or {}
+            run.completed_items += 1
             if item.get("type") == "agentMessage" and isinstance(item.get("text"), str):
-                run.final_messages.append(item["text"])
+                if item.get("phase") == "commentary":
+                    run.stage = "Codex 进度更新"
+                    run.detail = _progress_detail(item["text"], limit=240)
+                else:
+                    run.final_messages.append(item["text"])
+                    run.stage = "正在整理最终回复"
+                    run.detail = None
+            elif not run.stop_requested:
+                run.stage = "继续处理中"
+                run.detail = None
+        elif method == "turn/diff/updated":
+            run.stage = "正在整理代码改动"
+            run.detail = None
+        elif method == "item/commandExecution/outputDelta":
+            run.stage = "命令仍在执行"
+            run.detail = None
         elif method == "error":
             error = params.get("error") or {}
             run.error = str(error.get("message") or "Codex turn failed")
+            run.stage = "任务执行失败"
+            run.detail = _progress_detail(run.error)
         elif method == "turn/completed" and not run.done.done():
             run.done.set_result(params.get("turn") or {})
+        if run.stop_requested and method not in {"error", "turn/completed"}:
+            run.stage = "正在中断任务"
+            run.detail = None
+
+
+def _progress_detail(value: Any, limit: int = 120) -> str | None:
+    if value is None:
+        return None
+    text = " ".join(str(value).split())
+    return text[:limit] or None
+
+
+def _item_progress(item: dict[str, Any]) -> tuple[str, str | None]:
+    item_type = str(item.get("type") or "")
+    if item_type == "commandExecution":
+        return "正在执行命令", _progress_detail(item.get("cwd"))
+    if item_type == "fileChange":
+        changes = item.get("changes") or []
+        count = len(changes) if isinstance(changes, list) else 0
+        detail = f"{count} 个文件变更" if count else None
+        return "正在修改文件", detail
+    if item_type == "webSearch":
+        return "正在搜索资料", None
+    if item_type in {"mcpToolCall", "dynamicToolCall"}:
+        tool = item.get("tool") or item.get("name") or item.get("server")
+        return "正在调用工具", _progress_detail(tool)
+    if item_type == "reasoning":
+        return "正在分析任务", None
+    if item_type == "plan":
+        return "正在制定计划", None
+    if item_type == "contextCompaction":
+        return "正在压缩上下文", None
+    if item_type == "agentMessage":
+        return "正在整理回复", None
+    if item_type in {"collabAgentToolCall", "collabAgentToolCallOutput"}:
+        return "正在协调子任务", None
+    return "正在处理任务", _progress_detail(item_type)
