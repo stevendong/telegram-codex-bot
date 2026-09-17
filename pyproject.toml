@@ -1,0 +1,16 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "telegram-codex-bot"
+version = "0.1.0"
+description = "Switch and control local Codex agent threads from Telegram"
+requires-python = ">=3.11"
+dependencies = []
+
+[project.scripts]
+telegram-codex-bot = "telegram_codex_bot.__main__:main"
+
+[tool.setuptools.packages.find]
+include = ["telegram_codex_bot*"]

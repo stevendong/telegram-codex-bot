@@ -1,0 +1,291 @@
+from __future__ import annotations
+
+import asyncio
+import re
+from dataclasses import dataclass, field
+from typing import Any
+
+from .app_server import CodexAppServer
+from .config import Config
+from .state import StateStore
+
+AGENT_NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]{0,31}$")
+
+
+def normalize_agent_name(value: str) -> str:
+    name = value.strip().lower()
+    if not AGENT_NAME_RE.fullmatch(name):
+        raise ValueError("Agent 名称只能包含字母、数字、_、-，长度 1–32")
+    return name
+
+
+@dataclass(slots=True)
+class TurnResult:
+    status: str
+    text: str
+    error: str | None = None
+
+
+@dataclass(slots=True)
+class _TurnRun:
+    done: asyncio.Future[dict[str, Any]]
+    turn_id: str | None = None
+    final_messages: list[str] = field(default_factory=list)
+    deltas: list[str] = field(default_factory=list)
+    error: str | None = None
+
+
+class AgentService:
+    def __init__(
+        self,
+        config: Config,
+        state: StateStore,
+        apps: dict[str, CodexAppServer],
+    ):
+        self.config = config
+        self.state = state
+        self.apps = apps
+        for account, app in apps.items():
+            app.add_notification_handler(
+                lambda method, params, account=account: self._on_notification(
+                    account, method, params
+                )
+            )
+        self._loaded_threads: set[tuple[str, str]] = set()
+        self._runs: dict[tuple[str, str], _TurnRun] = {}
+        self._locks: dict[tuple[int, str], asyncio.Lock] = {}
+        self._semaphore = asyncio.Semaphore(config.max_parallel_turns)
+
+    def _thread_params(self) -> dict[str, Any]:
+        params: dict[str, Any] = {
+            "cwd": str(self.config.codex_cwd),
+            "approvalPolicy": "never",
+            "sandbox": self.config.codex_sandbox,
+            "serviceName": "telegram_codex_bot",
+        }
+        if self.config.codex_model:
+            params["model"] = self.config.codex_model
+        return params
+
+    def account_names(self) -> list[str]:
+        return list(self.apps)
+
+    def _app(self, account: str) -> CodexAppServer:
+        try:
+            return self.apps[account]
+        except KeyError as exc:
+            raise ValueError(f"未知 Codex 账号：{account}") from exc
+
+    async def create_agent(
+        self,
+        user_id: int,
+        raw_name: str,
+        account: str | None = None,
+    ) -> str:
+        name = normalize_agent_name(raw_name)
+        if self.state.get_agent(user_id, name):
+            raise ValueError(f"Agent 已存在：{name}")
+        account = (account or self.config.default_account).lower()
+        app = self._app(account)
+        result = await app.request("thread/start", self._thread_params())
+        thread_id = str(result["thread"]["id"])
+        self._loaded_threads.add((account, thread_id))
+        self.state.create_agent(user_id, name, thread_id, account=account)
+        return name
+
+    async def import_agent(
+        self,
+        user_id: int,
+        raw_name: str,
+        thread_id: str,
+        account: str | None = None,
+    ) -> str:
+        name = normalize_agent_name(raw_name)
+        if self.state.get_agent(user_id, name):
+            raise ValueError(f"Agent 已存在：{name}")
+        account = (account or self.config.default_account).lower()
+        app = self._app(account)
+        await app.request(
+            "thread/read", {"threadId": thread_id.strip(), "includeTurns": False}
+        )
+        self.state.create_agent(
+            user_id, name, thread_id.strip(), account=account
+        )
+        return name
+
+    async def fork_agent(self, user_id: int, raw_name: str) -> str:
+        name = normalize_agent_name(raw_name)
+        if self.state.get_agent(user_id, name):
+            raise ValueError(f"Agent 已存在：{name}")
+        source_name = self.state.get_active_name(user_id)
+        source = self.state.get_agent(user_id, source_name)
+        if not source or not source.get("thread_id"):
+            raise ValueError("当前 Agent 尚无可分叉的会话")
+        if source.get("status") == "running":
+            raise ValueError("当前 Agent 正在运行，请完成或停止后再分叉")
+        account = str(source.get("account") or self.config.default_account)
+        app = self._app(account)
+        params = {"threadId": source["thread_id"], **self._thread_params()}
+        result = await app.request("thread/fork", params)
+        thread_id = str(result["thread"]["id"])
+        self._loaded_threads.add((account, thread_id))
+        self.state.create_agent(user_id, name, thread_id, account=account)
+        return name
+
+    async def list_server_threads(
+        self, account: str, limit: int = 15
+    ) -> list[dict[str, Any]]:
+        app = self._app(account)
+        result = await app.request(
+            "thread/list",
+            {
+                "limit": limit,
+                "sortKey": "updated_at",
+                "sortDirection": "desc",
+            },
+        )
+        return list(result.get("data", []))
+
+    async def run_turn(self, user_id: int, name: str, text: str) -> TurnResult:
+        name = normalize_agent_name(name)
+        lock = self._locks.setdefault((user_id, name), asyncio.Lock())
+        async with lock, self._semaphore:
+            account, thread_id = await self._ensure_thread(user_id, name)
+            app = self._app(account)
+            loop = asyncio.get_running_loop()
+            run = _TurnRun(done=loop.create_future())
+            self._runs[(account, thread_id)] = run
+            self.state.update_agent(
+                user_id,
+                name,
+                status="running",
+                active_turn_id=None,
+                last_error=None,
+            )
+            try:
+                response = await app.request(
+                    "turn/start",
+                    {
+                        "threadId": thread_id,
+                        "input": [{"type": "text", "text": text}],
+                    },
+                )
+                run.turn_id = str(response["turn"]["id"])
+                self.state.update_agent(user_id, name, active_turn_id=run.turn_id)
+                completed = await asyncio.wait_for(
+                    asyncio.shield(run.done),
+                    timeout=self.config.turn_timeout_seconds,
+                )
+                status = str(completed.get("status", "completed"))
+                error_obj = completed.get("error") or {}
+                error = run.error or error_obj.get("message")
+                text_result = "\n\n".join(msg for msg in run.final_messages if msg).strip()
+                if not text_result:
+                    text_result = "".join(run.deltas).strip()
+                if not text_result:
+                    text_result = "任务已结束，但 Codex 没有返回文本消息。"
+                self.state.update_agent(
+                    user_id,
+                    name,
+                    status="idle" if status == "completed" else status,
+                    active_turn_id=None,
+                    last_error=error,
+                )
+                return TurnResult(status=status, text=text_result, error=error)
+            except TimeoutError:
+                if run.turn_id:
+                    await app.request(
+                        "turn/interrupt",
+                        {"threadId": thread_id, "turnId": run.turn_id},
+                    )
+                error = f"任务超过 {self.config.turn_timeout_seconds} 秒，已请求中止"
+                self.state.update_agent(
+                    user_id,
+                    name,
+                    status="failed",
+                    active_turn_id=None,
+                    last_error=error,
+                )
+                return TurnResult(status="failed", text=error, error=error)
+            except Exception as exc:
+                self.state.update_agent(
+                    user_id,
+                    name,
+                    status="failed",
+                    active_turn_id=None,
+                    last_error=str(exc),
+                )
+                raise
+            finally:
+                self._runs.pop((account, thread_id), None)
+
+    async def stop_agent(self, user_id: int, name: str) -> bool:
+        agent = self.state.get_agent(user_id, name)
+        if not agent:
+            raise KeyError(name)
+        thread_id = agent.get("thread_id")
+        turn_id = agent.get("active_turn_id")
+        if not thread_id or not turn_id:
+            return False
+        account = str(agent.get("account") or self.config.default_account)
+        await self._app(account).request(
+            "turn/interrupt", {"threadId": thread_id, "turnId": turn_id}
+        )
+        return True
+
+    async def purge_agent(self, user_id: int, name: str) -> None:
+        agent = self.state.get_agent(user_id, name)
+        if not agent:
+            raise KeyError(name)
+        if agent.get("status") == "running":
+            raise ValueError("Agent 正在运行，请先 /stop")
+        thread_id = agent.get("thread_id")
+        account = str(agent.get("account") or self.config.default_account)
+        if thread_id:
+            await self._app(account).request(
+                "thread/delete", {"threadId": thread_id}
+            )
+            self._loaded_threads.discard((account, thread_id))
+        self.state.detach_agent(user_id, name)
+
+    async def _ensure_thread(self, user_id: int, name: str) -> tuple[str, str]:
+        agent = self.state.get_agent(user_id, name)
+        if not agent:
+            raise KeyError(name)
+        account = str(agent.get("account") or self.config.default_account)
+        app = self._app(account)
+        thread_id = agent.get("thread_id")
+        if not thread_id:
+            result = await app.request("thread/start", self._thread_params())
+            thread_id = str(result["thread"]["id"])
+            self.state.update_agent(user_id, name, thread_id=thread_id)
+            self._loaded_threads.add((account, thread_id))
+            return account, thread_id
+        if (account, thread_id) not in self._loaded_threads:
+            params = {"threadId": thread_id, **self._thread_params()}
+            await app.request("thread/resume", params)
+            self._loaded_threads.add((account, thread_id))
+        return account, str(thread_id)
+
+    def _on_notification(
+        self, account: str, method: str, params: dict[str, Any]
+    ) -> None:
+        thread_id = params.get("threadId")
+        if not thread_id:
+            return
+        run = self._runs.get((account, str(thread_id)))
+        if not run:
+            return
+        if method == "item/agentMessage/delta":
+            delta = params.get("delta")
+            if isinstance(delta, str):
+                run.deltas.append(delta)
+        elif method == "item/completed":
+            item = params.get("item") or {}
+            if item.get("type") == "agentMessage" and isinstance(item.get("text"), str):
+                run.final_messages.append(item["text"])
+        elif method == "error":
+            error = params.get("error") or {}
+            run.error = str(error.get("message") or "Codex turn failed")
+        elif method == "turn/completed" and not run.done.done():
+            run.done.set_result(params.get("turn") or {})

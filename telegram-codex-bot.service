@@ -1,0 +1,34 @@
+[Unit]
+Description=Telegram client for local Codex agents
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=ubuntu
+Group=ubuntu
+Environment=HOME=/home/ubuntu
+Environment=PYTHONUNBUFFERED=1
+Environment=PATH=/home/ubuntu/.nvm/versions/node/v23.11.1/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+Environment=CODEX_ACCOUNTS=default=/home/ubuntu/.codex,account4=/home/ubuntu/.codex-account-4,agentopt=/home/ubuntu/.codex-agent-opt
+Environment=CODEX_DEFAULT_ACCOUNT=default
+EnvironmentFile=/etc/telegram-codex-bot.env
+WorkingDirectory=/data/telegram-codex-bot
+ExecStart=/usr/bin/python3 -m telegram_codex_bot
+Restart=on-failure
+RestartSec=5
+# Telegram long polling may take up to 45s to return after SIGTERM.
+TimeoutStopSec=70
+KillMode=control-group
+
+StateDirectory=telegram-codex-bot
+UMask=0077
+PrivateTmp=true
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=read-only
+ReadWritePaths=/data /home/ubuntu/.codex /home/ubuntu/.codex-account-4 /home/ubuntu/.codex-agent-opt /var/lib/telegram-codex-bot
+RestrictSUIDSGID=true
+
+[Install]
+WantedBy=multi-user.target
