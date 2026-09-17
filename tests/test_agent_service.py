@@ -118,3 +118,18 @@ class AgentServiceTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(method, "account/rateLimitResetCredit/consume")
             self.assertEqual(params["creditId"], "credit-1")
             self.assertTrue(params["idempotencyKey"])
+
+    async def test_reads_account_usage(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            state = StateStore(Path(temp) / "state.json")
+            app = _FakeApp()
+            config = SimpleNamespace(
+                max_parallel_turns=4,
+                default_account="default",
+                codex_model=None,
+            )
+            service = AgentService(config, state, {"default": app})
+
+            usage = await service.get_account_usage("default")
+            self.assertEqual(usage["primary"]["usedPercent"], 80)
+            self.assertEqual(app.requests[-1][0], "account/rateLimits/read")

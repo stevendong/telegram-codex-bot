@@ -12,6 +12,9 @@ from telegram_codex_bot.telegram_api import TelegramAPI
 
 
 class _FakeService:
+    def __init__(self) -> None:
+        self.usage_requests: list[str] = []
+
     def account_names(self) -> list[str]:
         return ["default"]
 
@@ -20,6 +23,13 @@ class _FakeService:
 
     def account_alias(self, account: str) -> str:
         return "main" if account == "default" else account
+
+    async def get_account_usage(self, account: str) -> dict[str, Any]:
+        self.usage_requests.append(account)
+        return {
+            "primary": {"usedPercent": 20, "windowDurationMins": 300},
+            "secondary": {"usedPercent": 55, "windowDurationMins": 10080},
+        }
 
 
 class _FakeModelService(_FakeService):
@@ -107,8 +117,9 @@ class BotCallbackTests(unittest.IsolatedAsyncioTestCase):
                 codex_model=None,
             )
             telegram = _RecordingTelegramAPI()
+            service = _FakeService()
             bot = TelegramCodexBot(
-                config, state, _FakeService(), telegram  # type: ignore[arg-type]
+                config, state, service, telegram  # type: ignore[arg-type]
             )
 
             await bot._handle_update(  # noqa: SLF001
@@ -130,7 +141,10 @@ class BotCallbackTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(methods, ["editMessageText", "answerCallbackQuery"])
             edit_payload = telegram.calls[0][1]
             self.assertIn("当前：reviewer", edit_payload["text"])
+            self.assertIn("5 小时剩余 80%", edit_payload["text"])
+            self.assertIn("7 天剩余 45%", edit_payload["text"])
             self.assertIn("reply_markup", edit_payload)
+            self.assertEqual(service.usage_requests, ["default"])
 
     async def test_model_button_switches_current_agent_and_refreshes_picker(self) -> None:
         with tempfile.TemporaryDirectory() as temp:

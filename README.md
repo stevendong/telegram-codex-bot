@@ -43,7 +43,7 @@
 
 `/deleteagent` 只删除 Telegram 别名，不删除 Codex 历史；`/purgeagent` 才会永久删除 thread。
 
-`/agents` 和 `/models` 会显示可直接点击的切换按钮，并在切换后原地刷新选中状态。`/models` 会实时读取当前 Agent 所属账号可用的模型；`/model <模型ID>` 仍可用于文字切换，选择会持久化到当前 Agent，并从下一次任务起生效。`/model default` 可恢复账号默认模型。
+`/agents` 会在每个 Agent 下显示其账号的短期和长期剩余 Usage，并提供可直接点击的切换按钮；多个 Agent 属于同一账号时只查询一次额度。`/models` 会实时读取当前 Agent 所属账号可用的模型；`/model <模型ID>` 仍可用于文字切换，选择会持久化到当前 Agent，并从下一次任务起生效。`/model default` 可恢复账号默认模型。
 
 `/reset` 会读取当前 Agent 所属账号的可用重置卡。先选择卡片，再点击“确认使用”才会调用 Codex；卡片 ID 不会显示在 Telegram 中，选择按钮 10 分钟后失效。
 

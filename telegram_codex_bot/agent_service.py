@@ -143,6 +143,13 @@ class AgentService:
             status["rate_limit_error"] = str(exc)
         return status
 
+    async def get_account_usage(self, account: str) -> dict[str, Any]:
+        """Return the current Codex rate-limit snapshot for one account."""
+        response = await self._app(account).request(
+            "account/rateLimits/read", {}
+        )
+        return dict(response.get("rateLimits") or {})
+
     async def get_reset_credits(self, account: str) -> dict[str, Any]:
         response = await self._app(account).request(
             "account/rateLimits/read", {}

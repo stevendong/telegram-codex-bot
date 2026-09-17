@@ -193,7 +193,7 @@ class TelegramCodexBot:
                     await self._answer_callback(query_id, "已经是当前 Agent")
                     return
                 self.state.set_active(user_id, name)
-                text, markup = self._agent_picker(user_id)
+                text, markup = await self._agent_picker(user_id)
                 await self._edit_or_send(chat_id, message_id, text, markup)
                 await self._answer_callback(query_id, f"已切换到 Agent：{name}")
                 return
@@ -310,7 +310,7 @@ class TelegramCodexBot:
         if command in {"start", "help"}:
             await self.telegram.send_message(chat_id, HELP)
         elif command == "agents":
-            text, markup = self._agent_picker(user_id)
+            text, markup = await self._agent_picker(user_id)
             await self.telegram.send_message(
                 chat_id, text, reply_markup=markup
             )
@@ -328,7 +328,7 @@ class TelegramCodexBot:
             self._require_args(args, 1, "/agent <名称>")
             name = normalize_agent_name(args[0])
             self.state.set_active(user_id, name)
-            text, markup = self._agent_picker(user_id)
+            text, markup = await self._agent_picker(user_id)
             await self.telegram.send_message(
                 chat_id, text, reply_markup=markup
             )
@@ -436,13 +436,26 @@ class TelegramCodexBot:
             detail = result.error or result.text
             await self.telegram.send_message(chat_id, f"{prefix} 执行失败\n{detail}")
 
-    def _agent_picker(self, user_id: int) -> tuple[str, dict[str, Any]]:
+    async def _agent_picker(
+        self, user_id: int
+    ) -> tuple[str, dict[str, Any]]:
         active, agents = self.state.list_agents(user_id)
         if not agents:
             return (
                 "尚无 Agent。使用 /newagent <名称> 创建。",
                 {"inline_keyboard": []},
             )
+        accounts = list(
+            dict.fromkeys(
+                str(agent.get("account") or self.config.default_account)
+                for agent in agents.values()
+            )
+        )
+        usage_results = await asyncio.gather(
+            *(self.service.get_account_usage(account) for account in accounts),
+            return_exceptions=True,
+        )
+        usage_by_account = dict(zip(accounts, usage_results, strict=True))
         lines = ["Agent 切换", f"当前：{active}", ""]
         buttons: list[dict[str, str]] = []
         for name, agent in agents.items():
@@ -457,6 +470,9 @@ class TelegramCodexBot:
             lines.append(
                 f"{marker} {name}{account_detail} · {model} · "
                 f"{agent.get('status', 'idle')} · {thread_marker}"
+            )
+            lines.append(
+                f"   Usage：{_format_compact_usage(usage_by_account[str(account)])}"
             )
             buttons.append(
                 {
@@ -797,3 +813,28 @@ def _rate_window_label(duration: Any, fallback: str) -> str:
 
 def _single_line(value: Any, limit: int) -> str:
     return " ".join(str(value).split())[:limit]
+
+
+def _format_compact_usage(value: Any) -> str:
+    if isinstance(value, Exception):
+        return "查询失败"
+    if not isinstance(value, dict) or not value:
+        return "未返回额度信息"
+    windows: list[str] = []
+    for key, fallback_label in (("primary", "主要"), ("secondary", "次要")):
+        window = value.get(key)
+        if not isinstance(window, dict):
+            continue
+        duration = window.get("windowDurationMins")
+        label = _rate_window_label(duration, fallback_label).removesuffix("额度")
+        try:
+            used = int(window.get("usedPercent", 0))
+        except (TypeError, ValueError):
+            continue
+        remaining = max(0, min(100, 100 - used))
+        windows.append(f"{label}剩余 {remaining}%")
+    if windows:
+        return " · ".join(windows)
+    if value.get("rateLimitReachedType"):
+        return "已达到额度上限"
+    return "未返回额度窗口"
