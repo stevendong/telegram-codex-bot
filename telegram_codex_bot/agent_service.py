@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 import re
+import uuid
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -9,13 +11,14 @@ from .app_server import CodexAppServer
 from .config import Config
 from .state import StateStore
 
-AGENT_NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]{0,31}$")
+AGENT_NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._+@-]{0,31}$")
+LOG = logging.getLogger(__name__)
 
 
 def normalize_agent_name(value: str) -> str:
     name = value.strip().lower()
     if not AGENT_NAME_RE.fullmatch(name):
-        raise ValueError("Agent 名称只能包含字母、数字、_、-，长度 1–32")
+        raise ValueError("Agent 名称只能包含字母、数字和 . _ + @ -，长度 1–32")
     return name
 
 
@@ -55,6 +58,7 @@ class AgentService:
         self._runs: dict[tuple[str, str], _TurnRun] = {}
         self._locks: dict[tuple[int, str], asyncio.Lock] = {}
         self._semaphore = asyncio.Semaphore(config.max_parallel_turns)
+        self._account_aliases = {name: name for name in apps}
 
     def _thread_params(self, model: str | None = None) -> dict[str, Any]:
         params: dict[str, Any] = {
@@ -71,6 +75,38 @@ class AgentService:
     def account_names(self) -> list[str]:
         return list(self.apps)
 
+    def account_aliases(self) -> dict[str, str]:
+        return dict(self._account_aliases)
+
+    def account_alias(self, account: str) -> str:
+        return self._account_aliases.get(account, account)
+
+    async def load_account_aliases(self) -> dict[str, str]:
+        """Load privacy-safe account labels from the first 10 email characters."""
+        aliases: dict[str, str] = {}
+        for account, app in self.apps.items():
+            try:
+                response = await app.request(
+                    "account/read", {"refreshToken": False}
+                )
+                account_data = response.get("account") or {}
+                email = str(account_data.get("email") or "").strip()
+                alias = normalize_agent_name(email[:10]) if email else account
+            except Exception:
+                LOG.warning(
+                    "Could not read account email for %s; using configured name",
+                    account,
+                    exc_info=True,
+                )
+                alias = account
+            if alias in aliases.values():
+                raise ValueError(
+                    f"多个 Codex 账号的邮箱前 10 个字符相同：{alias}"
+                )
+            aliases[account] = alias
+        self._account_aliases = aliases
+        return dict(aliases)
+
     def _app(self, account: str) -> CodexAppServer:
         try:
             return self.apps[account]
@@ -85,11 +121,12 @@ class AgentService:
         )
         account_data = account_response.get("account") or {}
         status: dict[str, Any] = {
-            "name": account,
+            "name": self.account_alias(account),
             "logged_in": bool(account_data),
             "type": account_data.get("type"),
             "plan_type": account_data.get("planType"),
             "rate_limits": {},
+            "reset_credits": {},
             "rate_limit_error": None,
         }
         if not account_data:
@@ -99,9 +136,39 @@ class AgentService:
                 "account/rateLimits/read", {}
             )
             status["rate_limits"] = rate_limit_response.get("rateLimits") or {}
+            status["reset_credits"] = (
+                rate_limit_response.get("rateLimitResetCredits") or {}
+            )
         except Exception as exc:
             status["rate_limit_error"] = str(exc)
         return status
+
+    async def get_reset_credits(self, account: str) -> dict[str, Any]:
+        response = await self._app(account).request(
+            "account/rateLimits/read", {}
+        )
+        summary = response.get("rateLimitResetCredits") or {}
+        credits = [
+            dict(item)
+            for item in (summary.get("credits") or [])
+            if isinstance(item, dict) and item.get("status") == "available"
+        ]
+        return {
+            "available_count": int(summary.get("availableCount") or 0),
+            "credits": credits,
+            "rate_limits": response.get("rateLimits") or {},
+        }
+
+    async def consume_reset_credit(
+        self, account: str, credit_id: str | None
+    ) -> str:
+        params: dict[str, Any] = {"idempotencyKey": str(uuid.uuid4())}
+        if credit_id is not None:
+            params["creditId"] = credit_id
+        response = await self._app(account).request(
+            "account/rateLimitResetCredit/consume", params
+        )
+        return str(response.get("outcome") or "unknown")
 
     async def list_models(self, account: str) -> list[dict[str, Any]]:
         app = self._app(account)

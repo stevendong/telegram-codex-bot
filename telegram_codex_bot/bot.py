@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import secrets
+import time
 from datetime import UTC, datetime
 from typing import Any
 
@@ -27,6 +29,7 @@ BOT_COMMANDS = [
     {"command": "threads", "description": "查看账号历史会话"},
     {"command": "importagent", "description": "导入已有会话"},
     {"command": "status", "description": "查看当前账号状态和额度"},
+    {"command": "reset", "description": "选择并使用 reset 重置卡"},
     {"command": "stop", "description": "停止 Agent 当前任务"},
     {"command": "help", "description": "显示完整帮助"},
 ]
@@ -46,6 +49,7 @@ HELP = """Telegram Codex Bot
 /threads [账号] — 列出指定账号最近保存的 Codex threads
 /importagent <名称> <thread_id> [账号] — 导入已有 thread
 /status — 当前 Agent、Codex 登录及额度状态
+/reset — 选择当前账号的 reset 重置卡（二次确认）
 /stop [名称] — 中止 Agent 当前任务
 /help — 显示帮助
 
@@ -74,6 +78,7 @@ class TelegramCodexBot:
         self.service = service
         self.telegram = telegram
         self._tasks: set[asyncio.Task[None]] = set()
+        self._reset_choices: dict[str, dict[str, Any]] = {}
 
     async def run(self, stop_event: asyncio.Event) -> None:
         offset = self.state.get_telegram_offset()
@@ -134,7 +139,7 @@ class TelegramCodexBot:
             return
 
         self.state.ensure_account_agents(
-            user_id, self.service.account_names(), self.config.default_account
+            user_id, self.service.account_aliases(), self.config.default_account
         )
         command = parse_command(text)
         try:
@@ -172,7 +177,7 @@ class TelegramCodexBot:
             return
 
         self.state.ensure_account_agents(
-            user_id, self.service.account_names(), self.config.default_account
+            user_id, self.service.account_aliases(), self.config.default_account
         )
         data = query.get("data")
         if not isinstance(data, str):
@@ -207,6 +212,60 @@ class TelegramCodexBot:
                 text, markup = await self._model_picker(user_id)
                 await self._edit_or_send(chat_id, message_id, text, markup)
                 await self._answer_callback(query_id, f"已切换模型：{model}")
+                return
+            if data.startswith("resetpick:"):
+                token = data.removeprefix("resetpick:")
+                choice = self._get_reset_choice(token, user_id)
+                self._validate_reset_choice(user_id, choice)
+                text = self._format_reset_confirmation(choice)
+                markup = {
+                    "inline_keyboard": [
+                        [
+                            {
+                                "text": "✅ 确认使用",
+                                "callback_data": f"resetuse:{token}",
+                            },
+                            {
+                                "text": "取消",
+                                "callback_data": f"resetcancel:{token}",
+                            },
+                        ]
+                    ]
+                }
+                await self._edit_or_send(chat_id, message_id, text, markup)
+                await self._answer_callback(query_id, "请确认是否使用 reset 卡")
+                return
+            if data.startswith("resetcancel:"):
+                token = data.removeprefix("resetcancel:")
+                self._get_reset_choice(token, user_id)
+                self._reset_choices.pop(token, None)
+                await self._edit_or_send(
+                    chat_id,
+                    message_id,
+                    "已取消，未使用 reset 重置卡。",
+                    {"inline_keyboard": []},
+                )
+                await self._answer_callback(query_id, "已取消")
+                return
+            if data.startswith("resetuse:"):
+                token = data.removeprefix("resetuse:")
+                choice = self._get_reset_choice(token, user_id)
+                self._validate_reset_choice(user_id, choice)
+                self._reset_choices.pop(token, None)
+                outcome = await self.service.consume_reset_credit(
+                    str(choice["account"]), choice.get("credit_id")
+                )
+                result_text = {
+                    "reset": "✅ reset 重置卡已使用，符合条件的额度窗口已重置。",
+                    "nothingToReset": "当前没有符合条件、可以重置的额度窗口。",
+                    "noCredit": "该账号当前没有可用的 reset 重置卡。",
+                    "alreadyRedeemed": "这次 reset 请求已经成功处理过。",
+                }.get(outcome, f"reset 请求已完成：{outcome}")
+                picker_text, markup = await self._reset_picker(user_id)
+                await self._edit_or_send(
+                    chat_id, message_id, f"{result_text}\n\n{picker_text}", markup
+                )
+                await self._answer_callback(query_id, result_text[:170])
                 return
             await self._answer_callback(query_id, "按钮已失效，请重新打开菜单", show_alert=True)
         except (ValueError, KeyError) as exc:
@@ -288,6 +347,9 @@ class TelegramCodexBot:
             self._require_args(args, 2, "/renameagent <旧名称> <新名称>")
             old = normalize_agent_name(args[0])
             new = normalize_agent_name(args[1])
+            agent = self.state.get_agent(user_id, old)
+            if agent and agent.get("account_primary"):
+                raise ValueError("账号主 Agent 的名称固定为登录邮箱前 10 个字符")
             self.state.rename_agent(user_id, old, new)
             await self.telegram.send_message(chat_id, f"已将 {old} 重命名为 {new}")
         elif command == "deleteagent":
@@ -300,7 +362,7 @@ class TelegramCodexBot:
                 raise ValueError("Agent 正在运行，请先 /stop")
             self.state.detach_agent(user_id, name)
             self.state.ensure_account_agents(
-                user_id, self.service.account_names(), self.config.default_account
+                user_id, self.service.account_aliases(), self.config.default_account
             )
             await self.telegram.send_message(
                 chat_id, f"已移除别名 {name}；Codex thread 仍保留，可用 /threads 找回。"
@@ -312,7 +374,7 @@ class TelegramCodexBot:
             name = normalize_agent_name(args[0])
             await self.service.purge_agent(user_id, name)
             self.state.ensure_account_agents(
-                user_id, self.service.account_names(), self.config.default_account
+                user_id, self.service.account_aliases(), self.config.default_account
             )
             await self.telegram.send_message(chat_id, f"已永久删除 Agent：{name}")
         elif command == "threads":
@@ -339,6 +401,11 @@ class TelegramCodexBot:
             await self.telegram.send_message(
                 chat_id,
                 format_status(name, agent, account_status),
+            )
+        elif command == "reset":
+            text, markup = await self._reset_picker(user_id)
+            await self.telegram.send_message(
+                chat_id, text, reply_markup=markup
             )
         elif command == "stop":
             name = normalize_agent_name(args[0]) if args else self.state.get_active_name(user_id)
@@ -383,8 +450,12 @@ class TelegramCodexBot:
             thread_marker = "已连接" if agent.get("thread_id") else "未启动"
             account = agent.get("account", self.config.default_account)
             model = agent.get("model") or self.config.codex_model or "默认模型"
+            account_detail = ""
+            account_alias = self.service.account_alias(str(account))
+            if name != account_alias:
+                account_detail = f" · 账号 {account_alias}"
             lines.append(
-                f"{marker} {name} · {account} · {model} · "
+                f"{marker} {name}{account_detail} · {model} · "
                 f"{agent.get('status', 'idle')} · {thread_marker}"
             )
             buttons.append(
@@ -404,14 +475,143 @@ class TelegramCodexBot:
         account = str(agent.get("account") or self.config.default_account)
         models = await self.service.list_models(account)
         selected_model = agent.get("model") or self.config.codex_model
-        return format_models(name, account, models, selected_model)
+        return format_models(
+            name, self.service.account_alias(account), models, selected_model
+        )
+
+    async def _reset_picker(
+        self, user_id: int
+    ) -> tuple[str, dict[str, Any]]:
+        self._prune_reset_choices()
+        name = self.state.get_active_name(user_id)
+        agent = self.state.get_agent(user_id, name) or {}
+        account = str(agent.get("account") or self.config.default_account)
+        snapshot = await self.service.get_reset_credits(account)
+        old_tokens = [
+            token
+            for token, choice in self._reset_choices.items()
+            if choice.get("user_id") == user_id
+        ]
+        for token in old_tokens:
+            self._reset_choices.pop(token, None)
+        available = int(snapshot.get("available_count") or 0)
+        credits = snapshot.get("credits") or []
+        lines = [
+            "Reset 重置卡",
+            f"Agent：{name}",
+            f"可用：{available} 张",
+        ]
+        if available <= 0:
+            lines.append("\n当前账号没有可用的 reset 重置卡。")
+            return "\n".join(lines), {"inline_keyboard": []}
+
+        lines.append("\n请选择要使用的卡；选择后还需再次确认：")
+        buttons: list[list[dict[str, str]]] = []
+        for index, credit in enumerate(credits, start=1):
+            title = _single_line(credit.get("title") or f"Reset 卡 {index}", 50)
+            description = _single_line(credit.get("description") or "", 100)
+            expires_at = credit.get("expiresAt")
+            detail = f"{index}. {title}"
+            if description:
+                detail += f" — {description}"
+            if isinstance(expires_at, (int, float)):
+                expiry = datetime.fromtimestamp(expires_at, UTC).astimezone()
+                detail += f"（有效期至 {expiry:%Y-%m-%d %H:%M}）"
+            lines.append(detail)
+            token = self._store_reset_choice(
+                user_id=user_id,
+                agent=name,
+                account=account,
+                credit_id=str(credit["id"]),
+                label=title,
+                expires_at=expires_at,
+            )
+            buttons.append(
+                [{"text": f"🎟 {title}", "callback_data": f"resetpick:{token}"}]
+            )
+
+        if available > len(credits):
+            label = "由系统选择下一张 Reset 卡"
+            token = self._store_reset_choice(
+                user_id=user_id,
+                agent=name,
+                account=account,
+                credit_id=None,
+                label=label,
+                expires_at=None,
+            )
+            buttons.append(
+                [{"text": f"🎟 {label}", "callback_data": f"resetpick:{token}"}]
+            )
+        return "\n".join(lines), {"inline_keyboard": buttons}
+
+    def _store_reset_choice(
+        self,
+        *,
+        user_id: int,
+        agent: str,
+        account: str,
+        credit_id: str | None,
+        label: str,
+        expires_at: Any,
+    ) -> str:
+        token = secrets.token_urlsafe(9)
+        while token in self._reset_choices:
+            token = secrets.token_urlsafe(9)
+        self._reset_choices[token] = {
+            "user_id": user_id,
+            "agent": agent,
+            "account": account,
+            "credit_id": credit_id,
+            "label": label,
+            "expires_at": expires_at,
+            "created_monotonic": time.monotonic(),
+        }
+        return token
+
+    def _prune_reset_choices(self) -> None:
+        cutoff = time.monotonic() - 600
+        expired = [
+            token
+            for token, choice in self._reset_choices.items()
+            if float(choice.get("created_monotonic", 0)) < cutoff
+        ]
+        for token in expired:
+            self._reset_choices.pop(token, None)
+
+    def _get_reset_choice(self, token: str, user_id: int) -> dict[str, Any]:
+        self._prune_reset_choices()
+        choice = self._reset_choices.get(token)
+        if not choice or choice.get("user_id") != user_id:
+            raise ValueError("reset 按钮已过期，请重新发送 /reset")
+        return choice
+
+    def _validate_reset_choice(
+        self, user_id: int, choice: dict[str, Any]
+    ) -> None:
+        if self.state.get_active_name(user_id) != choice.get("agent"):
+            raise ValueError("当前 Agent 已改变，请重新发送 /reset")
+
+    @staticmethod
+    def _format_reset_confirmation(choice: dict[str, Any]) -> str:
+        lines = [
+            "确认使用 reset 重置卡？",
+            f"Agent：{choice['agent']}",
+            f"卡片：{choice['label']}",
+        ]
+        expires_at = choice.get("expires_at")
+        if isinstance(expires_at, (int, float)):
+            expiry = datetime.fromtimestamp(expires_at, UTC).astimezone()
+            lines.append(f"有效期至：{expiry:%Y-%m-%d %H:%M}")
+        lines.append("\n确认后会立即尝试重置符合条件的 Codex 额度窗口。")
+        return "\n".join(lines)
 
     def _format_accounts(self, user_id: int) -> str:
         active_account = self._active_account(user_id)
         lines = ["Codex 账号："]
         for account in self.service.account_names():
             marker = "●" if account == active_account else "○"
-            lines.append(f"{marker} {account}")
+            lines.append(f"{marker} {self.service.account_alias(account)}")
         lines.append("\n通过 /agent <名称> 切换对应账号的 Agent。")
         return "\n".join(lines)
 
@@ -514,6 +714,9 @@ def format_status(
             reset_time = datetime.fromtimestamp(resets_at, UTC).astimezone()
             line += f"，重置 {reset_time:%m-%d %H:%M}"
         lines.append(line)
+    reset_credits = account_status.get("reset_credits") or {}
+    available_resets = int(reset_credits.get("availableCount") or 0)
+    lines.append(f"Reset 重置卡：{available_resets} 张可用")
     return "\n".join(lines)
 
 
@@ -590,3 +793,7 @@ def _rate_window_label(duration: Any, fallback: str) -> str:
     if duration % 60 == 0:
         return f"{duration // 60} 小时额度"
     return f"{duration} 分钟额度"
+
+
+def _single_line(value: Any, limit: int) -> str:
+    return " ".join(str(value).split())[:limit]

@@ -66,6 +66,7 @@ class StateStore:
                 stamp = now_iso()
                 user["agents"]["main"] = {
                     "account": default_account,
+                    "account_primary": True,
                     "model": None,
                     "thread_id": None,
                     "status": "idle",
@@ -80,46 +81,79 @@ class StateStore:
     def ensure_account_agents(
         self,
         user_id: int,
-        account_names: list[str],
+        account_aliases: dict[str, str],
         default_account: str,
     ) -> None:
-        """Ensure one immediately switchable Telegram agent per Codex account."""
+        """Ensure each Codex account has one primary agent named for its email."""
         with self._lock:
             user = self._user_locked(user_id)
             changed = False
-            if not user["agents"]:
-                stamp = now_iso()
-                user["agents"]["main"] = {
-                    "account": default_account,
-                    "model": None,
-                    "thread_id": None,
-                    "status": "idle",
-                    "active_turn_id": None,
-                    "created_at": stamp,
-                    "updated_at": stamp,
-                    "last_error": None,
-                }
-                user["active_agent"] = "main"
-                changed = True
-            main = user["agents"].get("main")
-            if main is not None and "account" not in main:
-                main["account"] = default_account
-                changed = True
-            represented = {
-                agent.get("account", default_account)
-                for agent in user["agents"].values()
-            }
+            agents = user["agents"]
+            legacy_state = bool(agents) and not any(
+                "account_primary" in agent for agent in agents.values()
+            )
             stamp = now_iso()
-            for account in account_names:
-                if account in represented:
+            for account, alias in account_aliases.items():
+                matching = [
+                    name
+                    for name, agent in agents.items()
+                    if agent.get("account", default_account) == account
+                ]
+                primary = next(
+                    (
+                        name
+                        for name in matching
+                        if agents[name].get("account_primary") is True
+                    ),
+                    None,
+                )
+                conventional = "main" if account == default_account else account
+                if alias in agents and alias in matching:
+                    primary = alias
+                elif primary is None and conventional in matching:
+                    primary = conventional
+                elif primary is None and legacy_state and matching:
+                    primary = matching[0]
+
+                if primary is None:
+                    if alias in agents:
+                        raise ValueError(f"Agent 名称与另一个账号冲突：{alias}")
+                    agents[alias] = {
+                        "account": account,
+                        "account_primary": True,
+                        "model": None,
+                        "thread_id": None,
+                        "status": "idle",
+                        "active_turn_id": None,
+                        "created_at": stamp,
+                        "updated_at": stamp,
+                        "last_error": None,
+                    }
+                    if user["active_agent"] is None:
+                        user["active_agent"] = alias
+                    changed = True
                     continue
-                alias = account
-                suffix = 2
-                while alias in user["agents"]:
-                    alias = f"{account}-{suffix}"
-                    suffix += 1
-                user["agents"][alias] = {
-                    "account": account,
+
+                for name in matching:
+                    expected = name == primary
+                    if agents[name].get("account_primary") is not expected:
+                        agents[name]["account_primary"] = expected
+                        changed = True
+
+                if primary != alias:
+                    if alias in agents:
+                        raise ValueError(f"Agent 名称与另一个账号冲突：{alias}")
+                    agents[alias] = agents.pop(primary)
+                    agents[alias]["updated_at"] = stamp
+                    if user["active_agent"] == primary:
+                        user["active_agent"] = alias
+                    changed = True
+
+            if not agents:
+                alias = account_aliases.get(default_account, "main")
+                agents[alias] = {
+                    "account": default_account,
+                    "account_primary": True,
                     "model": None,
                     "thread_id": None,
                     "status": "idle",
@@ -128,6 +162,7 @@ class StateStore:
                     "updated_at": stamp,
                     "last_error": None,
                 }
+                user["active_agent"] = alias
                 changed = True
             if changed:
                 self._save_locked()
@@ -147,6 +182,7 @@ class StateStore:
             stamp = now_iso()
             user["agents"][name] = {
                 "account": account,
+                "account_primary": False,
                 "model": None,
                 "thread_id": thread_id,
                 "status": "idle",

@@ -33,6 +33,31 @@ class _FakeApp:
                 ],
                 "nextCursor": None,
             }
+        if method == "account/read":
+            return {
+                "account": {
+                    "email": "Example.User@example.com",
+                    "type": "chatgpt",
+                    "planType": "plus",
+                }
+            }
+        if method == "account/rateLimits/read":
+            return {
+                "rateLimits": {"primary": {"usedPercent": 80}},
+                "rateLimitResetCredits": {
+                    "availableCount": 1,
+                    "credits": [
+                        {
+                            "id": "credit-1",
+                            "status": "available",
+                            "resetType": "codexRateLimits",
+                            "grantedAt": 1,
+                        }
+                    ],
+                },
+            }
+        if method == "account/rateLimitResetCredit/consume":
+            return {"outcome": "reset"}
         raise AssertionError(f"Unexpected request: {method}")
 
 
@@ -71,3 +96,25 @@ class AgentServiceTests(unittest.IsolatedAsyncioTestCase):
 
             with self.assertRaisesRegex(ValueError, "不支持模型"):
                 await service.set_agent_model(42, "main", "does-not-exist")
+
+    async def test_loads_email_alias_and_consumes_selected_reset_credit(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            state = StateStore(Path(temp) / "state.json")
+            app = _FakeApp()
+            config = SimpleNamespace(
+                max_parallel_turns=4,
+                default_account="default",
+                codex_model=None,
+            )
+            service = AgentService(config, state, {"default": app})
+
+            aliases = await service.load_account_aliases()
+            self.assertEqual(aliases, {"default": "example.us"})
+            snapshot = await service.get_reset_credits("default")
+            self.assertEqual(snapshot["available_count"], 1)
+            outcome = await service.consume_reset_credit("default", "credit-1")
+            self.assertEqual(outcome, "reset")
+            method, params = app.requests[-1]
+            self.assertEqual(method, "account/rateLimitResetCredit/consume")
+            self.assertEqual(params["creditId"], "credit-1")
+            self.assertTrue(params["idempotencyKey"])

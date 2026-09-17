@@ -51,15 +51,34 @@ class StateStoreTests(unittest.TestCase):
 
     def test_ensures_one_agent_per_account(self) -> None:
         self.state.ensure_account_agents(
-            42, ["default", "account4", "agentopt"], "default"
+            42,
+            {
+                "default": "silviafach",
+                "account4": "kyaaliya13",
+                "agentopt": "josephcunn",
+            },
+            "default",
         )
         active, agents = self.state.list_agents(42)
-        self.assertEqual(active, "main")
+        self.assertEqual(active, "silviafach")
         self.assertEqual(
             {name: agent["account"] for name, agent in agents.items()},
             {
-                "main": "default",
-                "account4": "account4",
-                "agentopt": "agentopt",
+                "silviafach": "default",
+                "kyaaliya13": "account4",
+                "josephcunn": "agentopt",
             },
         )
+
+    def test_migrates_primary_names_without_losing_thread(self) -> None:
+        self.state.ensure_default(42)
+        self.state.update_agent(42, "main", thread_id="thr_kept", model="gpt-test")
+        self.state.ensure_account_agents(
+            42, {"default": "silviafach"}, "default"
+        )
+        self.assertIsNone(self.state.get_agent(42, "main"))
+        migrated = self.state.get_agent(42, "silviafach")
+        self.assertEqual(migrated["thread_id"], "thr_kept")
+        self.assertEqual(migrated["model"], "gpt-test")
+        self.assertTrue(migrated["account_primary"])
+        self.assertEqual(self.state.get_active_name(42), "silviafach")

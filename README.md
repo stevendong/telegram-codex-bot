@@ -6,7 +6,9 @@
 
 - 创建、切换、分叉和停止多个 Codex Agent
 - 同时连接多套 Codex 登录，并通过 Agent 名称切换账号
+- 自动以登录邮箱的前 10 个字符命名每套账号的主 Agent
 - 按 Agent 查看并切换账号实际可用的 Codex 模型
+- 查看、选择并使用账号可用的 reset 重置卡（二次确认）
 - 每个 Agent 保留独立上下文
 - 发现并导入服务器已有 Codex threads
 - 不同 Agent 可以并行运行
@@ -34,6 +36,7 @@
 /threads [账号]
 /importagent <名称> <thread_id> [账号]
 /status  # 当前 Agent、Codex 登录和额度/重置时间
+/reset   # 选择当前账号的 reset 重置卡
 /stop [名称]
 /help
 ```
@@ -42,7 +45,9 @@
 
 `/agents` 和 `/models` 会显示可直接点击的切换按钮，并在切换后原地刷新选中状态。`/models` 会实时读取当前 Agent 所属账号可用的模型；`/model <模型ID>` 仍可用于文字切换，选择会持久化到当前 Agent，并从下一次任务起生效。`/model default` 可恢复账号默认模型。
 
-启动后会为每套登录自动准备一个可切换的 Agent。本机默认显示 `main @default`、`account4 @account4`、`agentopt @agentopt`；发送 `/agent account4` 即切换账号。首次向尚未启动的 Agent 发消息时才创建 thread。
+`/reset` 会读取当前 Agent 所属账号的可用重置卡。先选择卡片，再点击“确认使用”才会调用 Codex；卡片 ID 不会显示在 Telegram 中，选择按钮 10 分钟后失效。
+
+启动后会为每套登录自动准备一个可切换的主 Agent，其名称固定为对应登录邮箱的前 10 个字符。升级时会保留原 Agent 的 thread、模型和当前选中状态并自动改名；首次向尚未启动的 Agent 发消息时才创建 thread。
 
 ## 部署
 
@@ -119,3 +124,4 @@ python3 scripts/check-app-server.py
 - 仅私聊和白名单用户可以操作。
 - Bot Token 的环境文件权限应保持 `0600`。
 - `/purgeagent` 会永久删除 Codex thread，必须带 `confirm`。
+- `/reset` 会消耗 reset 重置卡，必须通过按钮二次确认。

@@ -15,6 +15,12 @@ class _FakeService:
     def account_names(self) -> list[str]:
         return ["default"]
 
+    def account_aliases(self) -> dict[str, str]:
+        return {"default": "main"}
+
+    def account_alias(self, account: str) -> str:
+        return "main" if account == "default" else account
+
 
 class _FakeModelService(_FakeService):
     def __init__(self, state: StateStore) -> None:
@@ -42,6 +48,33 @@ class _FakeModelService(_FakeService):
         self.selected.append((user_id, name, model))
         self.state.update_agent(user_id, name, model=model)
         return model
+
+
+class _FakeResetService(_FakeService):
+    def __init__(self) -> None:
+        self.consumed: list[tuple[str, str | None]] = []
+
+    async def get_reset_credits(self, account: str) -> dict[str, Any]:
+        self.requested_account = account
+        return {
+            "available_count": 1,
+            "credits": [
+                {
+                    "id": "credit-secret-id",
+                    "title": "Weekly reset",
+                    "description": "Reset Codex limits",
+                    "status": "available",
+                    "expiresAt": None,
+                }
+            ],
+            "rate_limits": {},
+        }
+
+    async def consume_reset_credit(
+        self, account: str, credit_id: str | None
+    ) -> str:
+        self.consumed.append((account, credit_id))
+        return "reset"
 
 
 class _RecordingTelegramAPI(TelegramAPI):
@@ -131,3 +164,64 @@ class BotCallbackTests(unittest.IsolatedAsyncioTestCase):
             methods = [method for method, _ in telegram.calls]
             self.assertEqual(methods, ["editMessageText", "answerCallbackQuery"])
             self.assertIn("当前模型：Other（gpt-other）", telegram.calls[0][1]["text"])
+
+    async def test_reset_card_requires_selection_and_confirmation(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            state = StateStore(Path(temp) / "state.json")
+            state.ensure_default(42)
+            config = SimpleNamespace(
+                allowed_user_ids=frozenset({42}),
+                default_account="default",
+                codex_model=None,
+            )
+            service = _FakeResetService()
+            telegram = _RecordingTelegramAPI()
+            bot = TelegramCodexBot(config, state, service, telegram)  # type: ignore[arg-type]
+
+            await bot._handle_update(  # noqa: SLF001
+                {
+                    "message": {
+                        "from": {"id": 42},
+                        "chat": {"id": 42, "type": "private"},
+                        "text": "/reset",
+                    }
+                }
+            )
+            reset_message = telegram.calls[-1][1]
+            button = reset_message["reply_markup"]["inline_keyboard"][0][0]
+            self.assertTrue(button["callback_data"].startswith("resetpick:"))
+            self.assertNotIn("credit-secret-id", str(reset_message))
+            self.assertEqual(service.consumed, [])
+
+            token = button["callback_data"].split(":", 1)[1]
+            callback_base = {
+                "from": {"id": 42},
+                "message": {
+                    "message_id": 9,
+                    "chat": {"id": 42, "type": "private"},
+                },
+            }
+            await bot._handle_update(  # noqa: SLF001
+                {
+                    "callback_query": {
+                        **callback_base,
+                        "id": "query-pick",
+                        "data": f"resetpick:{token}",
+                    }
+                }
+            )
+            self.assertEqual(service.consumed, [])
+            self.assertIn("确认使用", telegram.calls[-2][1]["text"])
+
+            await bot._handle_update(  # noqa: SLF001
+                {
+                    "callback_query": {
+                        **callback_base,
+                        "id": "query-use",
+                        "data": f"resetuse:{token}",
+                    }
+                }
+            )
+            self.assertEqual(
+                service.consumed, [("default", "credit-secret-id")]
+            )

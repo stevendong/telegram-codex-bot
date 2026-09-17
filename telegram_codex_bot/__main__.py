@@ -22,10 +22,6 @@ async def async_main() -> None:
         for name, codex_home in config.codex_accounts.items()
     }
     service = AgentService(config, state, apps)
-    for user_id in config.allowed_user_ids:
-        state.ensure_account_agents(
-            user_id, service.account_names(), config.default_account
-        )
     telegram = TelegramAPI(config.telegram_token)
     bot = TelegramCodexBot(config, state, service, telegram)
     stop_event = asyncio.Event()
@@ -41,6 +37,11 @@ async def async_main() -> None:
         )
         raise
     try:
+        account_aliases = await service.load_account_aliases()
+        for user_id in config.allowed_user_ids:
+            state.ensure_account_agents(
+                user_id, account_aliases, config.default_account
+            )
         try:
             await telegram.configure_command_menu(BOT_COMMANDS)
         except TelegramError:
