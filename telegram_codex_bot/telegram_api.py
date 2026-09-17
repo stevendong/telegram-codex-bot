@@ -70,7 +70,7 @@ class TelegramAPI:
             {
                 "offset": offset,
                 "timeout": poll_timeout,
-                "allowed_updates": ["message"],
+                "allowed_updates": ["message", "callback_query"],
             },
             timeout=poll_timeout + 15,
         )
@@ -91,16 +91,59 @@ class TelegramAPI:
             {"menu_button": {"type": "commands"}},
         )
 
-    async def send_message(self, chat_id: int, text: str) -> None:
-        for chunk in split_text(text):
+    async def send_message(
+        self,
+        chat_id: int,
+        text: str,
+        *,
+        reply_markup: dict[str, Any] | None = None,
+    ) -> None:
+        chunks = split_text(text)
+        for index, chunk in enumerate(chunks):
+            payload: dict[str, Any] = {
+                "chat_id": chat_id,
+                "text": chunk,
+                "disable_web_page_preview": True,
+            }
+            if reply_markup is not None and index == len(chunks) - 1:
+                payload["reply_markup"] = reply_markup
             await self.call(
                 "sendMessage",
-                {
-                    "chat_id": chat_id,
-                    "text": chunk,
-                    "disable_web_page_preview": True,
-                },
+                payload,
             )
+
+    async def edit_message_text(
+        self,
+        chat_id: int,
+        message_id: int,
+        text: str,
+        *,
+        reply_markup: dict[str, Any] | None = None,
+    ) -> None:
+        payload: dict[str, Any] = {
+            "chat_id": chat_id,
+            "message_id": message_id,
+            "text": text,
+            "link_preview_options": {"is_disabled": True},
+        }
+        if reply_markup is not None:
+            payload["reply_markup"] = reply_markup
+        await self.call("editMessageText", payload)
+
+    async def answer_callback_query(
+        self,
+        callback_query_id: str,
+        text: str | None = None,
+        *,
+        show_alert: bool = False,
+    ) -> None:
+        payload: dict[str, Any] = {
+            "callback_query_id": callback_query_id,
+            "show_alert": show_alert,
+        }
+        if text:
+            payload["text"] = text
+        await self.call("answerCallbackQuery", payload)
 
     async def send_typing(self, chat_id: int) -> None:
         await self.call("sendChatAction", {"chat_id": chat_id, "action": "typing"})

@@ -108,6 +108,11 @@ class TelegramCodexBot:
             await asyncio.gather(*pending, return_exceptions=True)
 
     async def _handle_update(self, update: dict[str, Any]) -> None:
+        callback_query = update.get("callback_query")
+        if isinstance(callback_query, dict):
+            await self._handle_callback_query(callback_query)
+            return
+
         message = update.get("message") or {}
         chat = message.get("chat") or {}
         sender = message.get("from") or {}
@@ -117,6 +122,9 @@ class TelegramCodexBot:
         user_id = sender.get("id")
         chat_id = chat.get("id")
         if not isinstance(user_id, int) or not isinstance(chat_id, int):
+            return
+        if not isinstance(user_id, int):
+            await self._answer_callback(query_id, "无效用户", show_alert=True)
             return
         if user_id not in self.config.allowed_user_ids:
             LOG.warning("Ignored unauthorized Telegram user %s", user_id)
@@ -141,38 +149,130 @@ class TelegramCodexBot:
             LOG.exception("Failed to handle Telegram update")
             await self.telegram.send_message(chat_id, f"内部错误：{exc}")
 
+    async def _handle_callback_query(self, query: dict[str, Any]) -> None:
+        query_id = query.get("id")
+        sender = query.get("from") or {}
+        message = query.get("message") or {}
+        chat = message.get("chat") or {}
+        user_id = sender.get("id")
+        chat_id = chat.get("id")
+        message_id = message.get("message_id")
+        if not isinstance(query_id, str):
+            return
+        if user_id not in self.config.allowed_user_ids:
+            LOG.warning("Ignored unauthorized Telegram callback user %s", user_id)
+            await self._answer_callback(query_id, "无权操作此 Bot", show_alert=True)
+            return
+        if (
+            not isinstance(chat_id, int)
+            or not isinstance(message_id, int)
+            or chat.get("type") != "private"
+        ):
+            await self._answer_callback(query_id, "仅允许在 Bot 私聊中使用", show_alert=True)
+            return
+
+        self.state.ensure_account_agents(
+            user_id, self.service.account_names(), self.config.default_account
+        )
+        data = query.get("data")
+        if not isinstance(data, str):
+            await self._answer_callback(query_id, "无效按钮", show_alert=True)
+            return
+        try:
+            if data == "noop":
+                await self._answer_callback(query_id, "已经是当前选项")
+                return
+            if data.startswith("agent:"):
+                name = normalize_agent_name(data.removeprefix("agent:"))
+                if self.state.get_active_name(user_id) == name:
+                    await self._answer_callback(query_id, "已经是当前 Agent")
+                    return
+                self.state.set_active(user_id, name)
+                text, markup = self._agent_picker(user_id)
+                await self._edit_or_send(chat_id, message_id, text, markup)
+                await self._answer_callback(query_id, f"已切换到 Agent：{name}")
+                return
+            if data.startswith("model:"):
+                payload = data.removeprefix("model:")
+                if ":" not in payload:
+                    raise ValueError("模型按钮已过期，请重新发送 /models")
+                target_name, requested = payload.split(":", 1)
+                target_name = normalize_agent_name(target_name)
+                name = self.state.get_active_name(user_id)
+                if target_name != name:
+                    raise ValueError("当前 Agent 已改变，请重新发送 /models")
+                model = await self.service.set_agent_model(
+                    user_id, name, requested
+                )
+                text, markup = await self._model_picker(user_id)
+                await self._edit_or_send(chat_id, message_id, text, markup)
+                await self._answer_callback(query_id, f"已切换模型：{model}")
+                return
+            await self._answer_callback(query_id, "按钮已失效，请重新打开菜单", show_alert=True)
+        except (ValueError, KeyError) as exc:
+            detail = exc.args[0] if exc.args else str(exc)
+            await self._answer_callback(
+                query_id, f"操作失败：{str(detail)[:170]}", show_alert=True
+            )
+        except Exception:
+            LOG.exception("Failed to handle Telegram callback")
+            await self._answer_callback(query_id, "内部错误，请稍后重试", show_alert=True)
+
+    async def _answer_callback(
+        self, query_id: str, text: str, *, show_alert: bool = False
+    ) -> None:
+        try:
+            await self.telegram.answer_callback_query(
+                query_id, text, show_alert=show_alert
+            )
+        except TelegramError:
+            LOG.warning("Could not answer Telegram callback", exc_info=True)
+
+    async def _edit_or_send(
+        self,
+        chat_id: int,
+        message_id: int,
+        text: str,
+        reply_markup: dict[str, Any],
+    ) -> None:
+        try:
+            await self.telegram.edit_message_text(
+                chat_id, message_id, text, reply_markup=reply_markup
+            )
+        except TelegramError:
+            LOG.warning("Could not edit picker message; sending a new one", exc_info=True)
+            await self.telegram.send_message(
+                chat_id, text, reply_markup=reply_markup
+            )
+
     async def _handle_command(
         self, user_id: int, chat_id: int, command: str, args: list[str]
     ) -> None:
         if command in {"start", "help"}:
             await self.telegram.send_message(chat_id, HELP)
         elif command == "agents":
-            await self.telegram.send_message(chat_id, self._format_agents(user_id))
+            text, markup = self._agent_picker(user_id)
+            await self.telegram.send_message(
+                chat_id, text, reply_markup=markup
+            )
         elif command == "accounts":
             await self.telegram.send_message(chat_id, self._format_accounts(user_id))
         elif command in {"models", "model"}:
             name = self.state.get_active_name(user_id)
-            agent = self.state.get_agent(user_id, name) or {}
-            account = str(agent.get("account") or self.config.default_account)
             if command == "model" and args:
-                model = await self.service.set_agent_model(user_id, name, args[0])
-                selected = model or self.config.codex_model or "账号默认模型"
-                await self.telegram.send_message(
-                    chat_id,
-                    f"Agent {name} 已切换模型：{selected}\n下一次任务起生效。",
-                )
-            else:
-                models = await self.service.list_models(account)
-                selected_model = agent.get("model") or self.config.codex_model
-                await self.telegram.send_message(
-                    chat_id,
-                    format_models(name, account, models, selected_model),
-                )
+                await self.service.set_agent_model(user_id, name, args[0])
+            text, markup = await self._model_picker(user_id)
+            await self.telegram.send_message(
+                chat_id, text, reply_markup=markup
+            )
         elif command == "agent":
             self._require_args(args, 1, "/agent <名称>")
             name = normalize_agent_name(args[0])
             self.state.set_active(user_id, name)
-            await self.telegram.send_message(chat_id, f"已切换到 Agent：{name}")
+            text, markup = self._agent_picker(user_id)
+            await self.telegram.send_message(
+                chat_id, text, reply_markup=markup
+            )
         elif command == "newagent":
             self._require_args(args, 1, "/newagent <名称> [账号]")
             account = args[1].lower() if len(args) > 1 else self._active_account(user_id)
@@ -269,19 +369,42 @@ class TelegramCodexBot:
             detail = result.error or result.text
             await self.telegram.send_message(chat_id, f"{prefix} 执行失败\n{detail}")
 
-    def _format_agents(self, user_id: int) -> str:
+    def _agent_picker(self, user_id: int) -> tuple[str, dict[str, Any]]:
         active, agents = self.state.list_agents(user_id)
         if not agents:
-            return "尚无 Agent。使用 /newagent <名称> 创建。"
-        lines = ["Agents："]
+            return (
+                "尚无 Agent。使用 /newagent <名称> 创建。",
+                {"inline_keyboard": []},
+            )
+        lines = ["Agent 切换", f"当前：{active}", ""]
+        buttons: list[dict[str, str]] = []
         for name, agent in agents.items():
-            marker = "●" if name == active else "○"
+            marker = "✅" if name == active else "▫️"
             thread_marker = "已连接" if agent.get("thread_id") else "未启动"
             account = agent.get("account", self.config.default_account)
+            model = agent.get("model") or self.config.codex_model or "默认模型"
             lines.append(
-                f"{marker} {name} @{account} — {agent.get('status', 'idle')} / {thread_marker}"
+                f"{marker} {name} · {account} · {model} · "
+                f"{agent.get('status', 'idle')} · {thread_marker}"
             )
-        return "\n".join(lines)
+            buttons.append(
+                {
+                    "text": f"{'✅ ' if name == active else ''}{name}",
+                    "callback_data": "noop" if name == active else f"agent:{name}",
+                }
+            )
+        lines.append("\n点击按钮即可切换：")
+        return "\n".join(lines), {"inline_keyboard": _button_rows(buttons)}
+
+    async def _model_picker(
+        self, user_id: int
+    ) -> tuple[str, dict[str, Any]]:
+        name = self.state.get_active_name(user_id)
+        agent = self.state.get_agent(user_id, name) or {}
+        account = str(agent.get("account") or self.config.default_account)
+        models = await self.service.list_models(account)
+        selected_model = agent.get("model") or self.config.codex_model
+        return format_models(name, account, models, selected_model)
 
     def _format_accounts(self, user_id: int) -> str:
         active_account = self._active_account(user_id)
@@ -399,37 +522,64 @@ def format_models(
     account: str,
     models: list[dict[str, Any]],
     selected_model: str | None,
-) -> str:
+) -> tuple[str, dict[str, Any]]:
     if not models:
-        return f"账号 {account} 没有返回可用模型。"
+        return (
+            f"账号 {account} 没有返回可用模型。",
+            {"inline_keyboard": []},
+        )
     default_model = next(
         (str(item.get("model")) for item in models if item.get("isDefault")),
         None,
     )
     active_model = selected_model or default_model
-    lines = [f"Agent：{agent_name}", f"Codex 账号：{account}", "可用模型："]
+    active_item = next(
+        (item for item in models if item.get("model") == active_model),
+        None,
+    )
+    active_name = (
+        str(active_item.get("displayName") or active_model)
+        if active_item
+        else str(active_model or "账号默认模型")
+    )
+    lines = [
+        "模型切换",
+        f"Agent：{agent_name}",
+        f"Codex 账号：{account}",
+        f"当前模型：{active_name}（{active_model or 'default'}）",
+        "",
+        "点击按钮切换，下次任务起生效：",
+    ]
+    buttons: list[dict[str, str]] = []
     for item in models:
         model = str(item.get("model") or item.get("id") or "unknown")
         display_name = str(item.get("displayName") or model)
-        marker = "●" if model == active_model else "○"
-        default_marker = "（账号默认）" if item.get("isDefault") else ""
-        efforts = [
-            str(option.get("reasoningEffort"))
-            for option in item.get("supportedReasoningEfforts", [])
-            if option.get("reasoningEffort")
-        ]
-        effort_text = f"；推理：{', '.join(efforts)}" if efforts else ""
-        lines.append(
-            f"{marker} {display_name} — {model}{default_marker}{effort_text}"
+        is_active = model == active_model
+        default_marker = " · 默认" if item.get("isDefault") else ""
+        buttons.append(
+            {
+                "text": f"{'✅ ' if is_active else ''}{display_name}{default_marker}",
+                "callback_data": (
+                    "noop" if is_active else f"model:{agent_name}:{model}"
+                ),
+            }
         )
-    lines.extend(
-        [
-            "",
-            "切换：/model <模型ID>",
-            "恢复账号默认：/model default",
-        ]
+    default_is_active = active_model == default_model
+    buttons.append(
+        {
+            "text": "↩️ 使用账号默认模型",
+            "callback_data": (
+                "noop" if default_is_active else f"model:{agent_name}:default"
+            ),
+        }
     )
-    return "\n".join(lines)
+    return "\n".join(lines), {"inline_keyboard": _button_rows(buttons)}
+
+
+def _button_rows(
+    buttons: list[dict[str, str]], columns: int = 2
+) -> list[list[dict[str, str]]]:
+    return [buttons[index : index + columns] for index in range(0, len(buttons), columns)]
 
 
 def _rate_window_label(duration: Any, fallback: str) -> str:

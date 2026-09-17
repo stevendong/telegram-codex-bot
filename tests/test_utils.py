@@ -55,7 +55,7 @@ class UtilityTests(unittest.TestCase):
         self.assertIn("7 天额度：已用 48%，剩余 52%", text)
 
     def test_format_models_marks_selected_model(self) -> None:
-        text = format_models(
+        text, markup = format_models(
             "main",
             "default",
             [
@@ -76,6 +76,30 @@ class UtilityTests(unittest.TestCase):
             ],
             "gpt-selected",
         )
-        self.assertIn("○ Default — gpt-default（账号默认）", text)
-        self.assertIn("● Selected — gpt-selected；推理：high", text)
-        self.assertIn("/model default", text)
+        self.assertIn("当前模型：Selected（gpt-selected）", text)
+        buttons = [
+            button
+            for row in markup["inline_keyboard"]
+            for button in row
+        ]
+        self.assertIn(
+            {
+                "text": "Default · 默认",
+                "callback_data": "model:main:gpt-default",
+            },
+            buttons,
+        )
+        self.assertTrue(
+            all(len(button["callback_data"].encode()) <= 64 for button in buttons)
+        )
+        self.assertIn(
+            {"text": "✅ Selected", "callback_data": "noop"},
+            buttons,
+        )
+        self.assertIn(
+            {
+                "text": "↩️ 使用账号默认模型",
+                "callback_data": "model:main:default",
+            },
+            buttons,
+        )
