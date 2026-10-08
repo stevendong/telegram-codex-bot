@@ -34,6 +34,28 @@ async def main() -> None:
                 f"{name}: App Server OK; returned "
                 f"{len(result.get('data', []))} thread(s)"
             )
+            # Read the same account-scoped catalog as the Telegram picker.
+            # This also verifies new model availability after a CLI upgrade.
+            cursor: str | None = None
+            models: list[dict] = []
+            while True:
+                result = await app.request(
+                    "model/list",
+                    {"cursor": cursor, "limit": 100, "includeHidden": False},
+                )
+                models.extend(result.get("data") or [])
+                cursor = result.get("nextCursor")
+                if not cursor:
+                    break
+            if not models:
+                raise RuntimeError(f"{name}: no picker-visible models returned")
+            for model in models:
+                efforts = ", ".join(
+                    option["reasoningEffort"]
+                    for option in model.get("supportedReasoningEfforts") or []
+                )
+                default = " (default)" if model.get("isDefault") else ""
+                print(f"{name}: {model['model']}{default}; efforts: {efforts}")
     finally:
         await asyncio.gather(
             *(app.close() for app in apps.values()), return_exceptions=True
