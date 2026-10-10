@@ -83,6 +83,34 @@ class _FakeApp:
         raise AssertionError(f"Unexpected request: {method}")
 
 
+class _QuotaRecoveryApp(_FakeApp):
+    def __init__(
+        self,
+        quota_errors: list[AppServerError],
+        refresh_error: AppServerError | None = None,
+        refreshed_account: bool = True,
+    ) -> None:
+        super().__init__()
+        self.quota_errors = list(quota_errors)
+        self.refresh_error = refresh_error
+        self.refreshed_account = refreshed_account
+
+    async def request(
+        self, method: str, params: dict[str, Any]
+    ) -> dict[str, Any]:
+        if method == "account/rateLimits/read" and self.quota_errors:
+            self.requests.append((method, params))
+            raise self.quota_errors.pop(0)
+        if method == "account/read" and params.get("refreshToken"):
+            if self.refresh_error:
+                self.requests.append((method, params))
+                raise self.refresh_error
+            if not self.refreshed_account:
+                self.requests.append((method, params))
+                return {"account": None}
+        return await super().request(method, params)
+
+
 class _ActiveWriterApp(_FakeApp):
     async def request(
         self, method: str, params: dict[str, Any]
@@ -377,6 +405,88 @@ class AgentServiceTests(unittest.IsolatedAsyncioTestCase):
             usage = await service.get_account_usage("default")
             self.assertEqual(usage["primary"]["usedPercent"], 80)
             self.assertEqual(app.requests[-1][0], "account/rateLimits/read")
+
+    async def test_quota_reads_refresh_and_retry_unauthorized_once(self) -> None:
+        for method in ("get_account_status", "get_account_usage", "get_reset_credits"):
+            with self.subTest(method=method), tempfile.TemporaryDirectory() as temp:
+                app = _QuotaRecoveryApp([AppServerError("GET usage failed: 401 Unauthorized")])
+                service = AgentService(
+                    SimpleNamespace(max_parallel_turns=4),
+                    StateStore(Path(temp) / "state.json"),
+                    {"default": app},
+                )
+                result = await getattr(service, method)("default")
+                self.assertEqual(
+                    app.requests[-3:],
+                    [
+                        ("account/rateLimits/read", {}),
+                        ("account/read", {"refreshToken": True}),
+                        ("account/rateLimits/read", {}),
+                    ],
+                )
+                if method == "get_account_status":
+                    self.assertFalse(result["authentication_required"])
+                    self.assertIsNone(result["rate_limit_error"])
+                    self.assertEqual(result["rate_limits"]["primary"]["usedPercent"], 80)
+                elif method == "get_account_usage":
+                    self.assertEqual(result["primary"]["usedPercent"], 80)
+                else:
+                    self.assertEqual(result["available_count"], 1)
+
+    async def test_status_marks_failed_auth_recovery_without_raw_response(self) -> None:
+        cases = (
+            _QuotaRecoveryApp(
+                [AppServerError("401 Unauthorized; body=private-response")],
+                refresh_error=AppServerError("refresh_token_reused; private-response"),
+            ),
+            _QuotaRecoveryApp(
+                [AppServerError("401 Unauthorized"), AppServerError("401 Unauthorized")]
+            ),
+            _QuotaRecoveryApp([AppServerError("401 Unauthorized")], refreshed_account=False),
+        )
+        for app in cases:
+            with self.subTest(app=app), tempfile.TemporaryDirectory() as temp:
+                service = AgentService(
+                    SimpleNamespace(max_parallel_turns=4),
+                    StateStore(Path(temp) / "state.json"),
+                    {"default": app},
+                )
+                result = await service.get_account_status("default")
+                self.assertTrue(result["authentication_required"])
+                self.assertEqual(result["rate_limit_error"], "Codex 登录已失效，请重新登录当前账号")
+                self.assertEqual(
+                    app.requests.count(("account/read", {"refreshToken": True})), 1
+                )
+                self.assertLessEqual(app.requests.count(("account/rateLimits/read", {})), 2)
+
+    async def test_status_does_not_refresh_on_server_errors(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            app = _QuotaRecoveryApp([AppServerError("503 Service Unavailable")])
+            service = AgentService(
+                SimpleNamespace(max_parallel_turns=4),
+                StateStore(Path(temp) / "state.json"),
+                {"default": app},
+            )
+            result = await service.get_account_status("default")
+            self.assertFalse(result["authentication_required"])
+            self.assertEqual(result["rate_limit_error"], "503 Service Unavailable")
+            self.assertNotIn(("account/read", {"refreshToken": True}), app.requests)
+
+    async def test_normal_status_does_not_force_token_refresh(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            app = _FakeApp()
+            service = AgentService(
+                SimpleNamespace(max_parallel_turns=4),
+                StateStore(Path(temp) / "state.json"),
+                {"default": app},
+            )
+            result = await service.get_account_status("default")
+            self.assertIsNone(result["rate_limit_error"])
+            self.assertFalse(result["authentication_required"])
+            self.assertEqual(
+                app.requests,
+                [("account/read", {"refreshToken": False}), ("account/rateLimits/read", {})],
+            )
 
     async def test_clear_agent_context_detaches_thread_and_preserves_settings(self) -> None:
         with tempfile.TemporaryDirectory() as temp:

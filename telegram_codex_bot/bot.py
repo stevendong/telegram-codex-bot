@@ -1025,7 +1025,10 @@ def format_status(
     )
     plan = account_status.get("plan_type")
     login_detail = f"{account_type} / {plan}" if plan else account_type
-    lines.append(f"登录状态：已登录（{login_detail}）")
+    login_state = (
+        "需重新登录" if account_status.get("authentication_required") else "已登录"
+    )
+    lines.append(f"登录状态：{login_state}（{login_detail}）")
 
     error = account_status.get("rate_limit_error")
     if error:

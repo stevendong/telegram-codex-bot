@@ -16,6 +16,27 @@ AGENT_NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._+@-]{0,31}$")
 LOG = logging.getLogger(__name__)
 
 
+class AccountAuthenticationError(AppServerError):
+    pass
+
+
+def _is_authentication_error(error: AppServerError) -> bool:
+    message = str(error).lower()
+    return bool(re.search(r"\b401\b", message)) or any(
+        marker in message
+        for marker in (
+            "token_expired",
+            "token_invalidated",
+            "invalid_token",
+            "refresh_token_reused",
+            "refresh_token_expired",
+            "refresh_token_invalidated",
+            "please sign in again",
+            "please log out and sign in again",
+        )
+    )
+
+
 def normalize_agent_name(value: str) -> str:
     name = value.strip().lower()
     if not AGENT_NAME_RE.fullmatch(name):
@@ -66,6 +87,7 @@ class AgentService:
         self._runs: dict[tuple[str, str], _TurnRun] = {}
         self._agent_runs: dict[tuple[int, str], _TurnRun] = {}
         self._locks: dict[tuple[int, str], asyncio.Lock] = {}
+        self._rate_limit_locks = {account: asyncio.Lock() for account in apps}
         self._semaphore = asyncio.Semaphore(config.max_parallel_turns)
         self._account_aliases = {name: name for name in apps}
 
@@ -137,32 +159,57 @@ class AgentService:
             "rate_limits": {},
             "reset_credits": {},
             "rate_limit_error": None,
+            "authentication_required": False,
         }
         if not account_data:
             return status
         try:
-            rate_limit_response = await app.request(
-                "account/rateLimits/read", {}
-            )
+            rate_limit_response = await self._read_rate_limits(account)
             status["rate_limits"] = rate_limit_response.get("rateLimits") or {}
             status["reset_credits"] = (
                 rate_limit_response.get("rateLimitResetCredits") or {}
             )
         except Exception as exc:
             status["rate_limit_error"] = str(exc)
+            status["authentication_required"] = isinstance(
+                exc, AccountAuthenticationError
+            )
         return status
+
+    async def _read_rate_limits(self, account: str) -> dict[str, Any]:
+        app = self._app(account)
+        async with self._rate_limit_locks[account]:
+            try:
+                try:
+                    return await app.request("account/rateLimits/read", {})
+                except AppServerError as exc:
+                    if not _is_authentication_error(exc):
+                        raise
+                    refreshed = await app.request(
+                        "account/read", {"refreshToken": True}
+                    )
+                    if not refreshed.get("account"):
+                        raise AccountAuthenticationError(
+                            "Codex 登录已失效，请重新登录当前账号"
+                        )
+                    return await app.request("account/rateLimits/read", {})
+            except AppServerError as exc:
+                if (
+                    isinstance(exc, AccountAuthenticationError)
+                    or _is_authentication_error(exc)
+                ):
+                    raise AccountAuthenticationError(
+                        "Codex 登录已失效，请重新登录当前账号"
+                    ) from exc
+                raise
 
     async def get_account_usage(self, account: str) -> dict[str, Any]:
         """Return the current Codex rate-limit snapshot for one account."""
-        response = await self._app(account).request(
-            "account/rateLimits/read", {}
-        )
+        response = await self._read_rate_limits(account)
         return dict(response.get("rateLimits") or {})
 
     async def get_reset_credits(self, account: str) -> dict[str, Any]:
-        response = await self._app(account).request(
-            "account/rateLimits/read", {}
-        )
+        response = await self._read_rate_limits(account)
         summary = response.get("rateLimitResetCredits") or {}
         credits = [
             dict(item)

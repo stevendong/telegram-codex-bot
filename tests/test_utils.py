@@ -79,6 +79,23 @@ class UtilityTests(unittest.TestCase):
         self.assertIn("5 小时额度：已用 100%，剩余 0%", text)
         self.assertIn("7 天额度：已用 48%，剩余 52%", text)
 
+    def test_status_does_not_claim_valid_login_after_rejected_refresh(self) -> None:
+        text = format_status(
+            "silviafach",
+            {"account": "default"},
+            {
+                "name": "silviafach",
+                "logged_in": True,
+                "type": "chatgpt",
+                "plan_type": "plus",
+                "authentication_required": True,
+                "rate_limit_error": "Codex 登录已失效，请重新登录当前账号",
+            },
+        )
+        self.assertIn("登录状态：需重新登录（ChatGPT / plus）", text)
+        self.assertNotIn("登录状态：已登录", text)
+        self.assertIn("请重新登录当前账号", text)
+
     def test_format_models_marks_selected_model(self) -> None:
         text, markup = format_models(
             "main",
