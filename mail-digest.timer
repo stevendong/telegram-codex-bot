@@ -1,8 +1,8 @@
 [Unit]
-Description=Support mailbox digest at 09:00 Asia/Shanghai every day
+Description=Support mailbox digest at 08:00 Asia/Shanghai every day
 
 [Timer]
-OnCalendar=*-*-* 09:00:00 Asia/Shanghai
+OnCalendar=*-*-* 08:00:00 Asia/Shanghai
 Persistent=true
 AccuracySec=1min
 Unit=mail-digest.service

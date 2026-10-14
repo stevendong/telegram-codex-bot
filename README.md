@@ -145,6 +145,6 @@ python3 scripts/check-app-server.py
 
 ## 独立邮件日报服务
 
-`mail_digest` 通过独立 `mail-digest.service` / `mail-digest.timer` 读取收件箱、调用 Codex 分类并推送私人 Telegram 报告，默认北京时间每日 09:00。它使用只读邮箱访问和禁用工具的 Codex 分析，与交互 Bot 分别运行。
+`mail_digest` 通过独立 `mail-digest.service` / `mail-digest.timer` 读取收件箱、调用 Codex 分类并推送私人 Telegram 报告，默认北京时间每日 08:00 开始处理，完成后发送通知。它使用只读邮箱访问和禁用工具的 Codex 分析，与交互 Bot 分别运行。
 
 [方案、运行状态和运维说明（Notion）](https://app.notion.com/p/3f92dbec685c81b1a8a4c4e8dcde81d4)
