@@ -59,6 +59,15 @@ class SourceTests(unittest.TestCase):
             flags = source.refresh([email(1)["id"], email(2)["id"]])
         self.assertEqual(flags, {email(1)["id"]: False, email(2)["id"]: True})
 
+    def test_unread_scan_checks_old_mail_without_a_date_lower_bound(self):
+        source = MailSource(config("/tmp"))
+        with patch.object(source, "get", return_value=[email()]) as get:
+            source.scan(None, "2026-10-15T00:00:00+00:00", unread_only=True)
+        query = get.call_args.args[0]
+        self.assertEqual(query["is_read"], "eq.false")
+        self.assertEqual(query["direction"], "eq.inbound")
+        self.assertNotIn("and", query)
+
     def test_incomplete_duplicate_foreign_and_low_confidence_results(self):
         for rows in [[], [analysis(email()), analysis(email())], [analysis(email(2))]]:
             with self.assertRaises(DigestError):
@@ -113,9 +122,11 @@ class FakeTelegram:
     def __init__(self, failures=None):
         self.failures = failures or {}
         self.calls = []
+        self.messages = []
 
     def message(self, text):
         self.calls.append("message")
+        self.messages.append(text)
         if len(self.calls) in self.failures:
             raise self.failures[len(self.calls)]
         return len(self.calls)
@@ -173,6 +184,20 @@ class DeliveryTests(unittest.TestCase):
                 deliver(self.store, FakeTelegram())
         self.assertEqual(self.store.pending()["status"], "uncertain")
 
+    def test_message_only_failure_keeps_checkpoint_then_retries_without_attachment(self):
+        payload = self.payload | {"summary": "暂无新增未读邮件", "full_report": None}
+        with self.store.db:
+            self.store.db.execute("UPDATE outbox SET payload=?", (json.dumps(payload),))
+        with self.assertRaises(DigestError):
+            deliver(self.store, FakeTelegram({1: DigestError("telegram_http_429")}))
+        self.assertIsNone(self.store.get("scan_until"))
+        self.assertEqual(self.store.pending()["next_part"], 0)
+        retry = FakeTelegram()
+        deliver(self.store, retry)
+        self.assertEqual(retry.calls, ["message"])
+        self.assertEqual(self.store.get("scan_until"), payload["scan_until"])
+        self.assertIsNone(self.store.pending())
+
 
 class RunTests(unittest.TestCase):
     def setUp(self):
@@ -212,6 +237,114 @@ class RunTests(unittest.TestCase):
             self.assertIsNone(store.get("scan_until"))
             self.assertIsNone(store.pending())
             store.db.close()
+
+    def test_no_unread_mail_sends_only_notification_without_agent(self):
+        with tempfile.TemporaryDirectory() as folder:
+            cfg = config(folder)
+            telegram = FakeTelegram()
+            with patch.object(MailSource, "scan", return_value=[]) as scan, \
+                 patch("mail_digest.service.Classifier") as classifier, \
+                 patch("mail_digest.service.Telegram", return_value=telegram):
+                run(cfg)
+                run(cfg)
+            classifier.assert_not_called()
+            scan.assert_called_once()
+            self.assertEqual(scan.call_args.args[0], None)
+            self.assertTrue(scan.call_args.kwargs["unread_only"])
+            self.assertEqual(telegram.calls, ["message"])
+            self.assertIn("当前未读邮件 0 封", telegram.messages[0])
+            self.assertIn("未启动 Agent", telegram.messages[0])
+            store = Store(cfg.state_dir / "state.sqlite3")
+            self.assertIsNotNone(store.get("scan_until"))
+            self.assertIsNotNone(store.get("last_report_date"))
+            self.assertIsNone(store.pending())
+            store.db.close()
+
+    def test_new_read_mail_does_not_launch_agent(self):
+        with tempfile.TemporaryDirectory() as folder:
+            cfg = config(folder)
+            telegram = FakeTelegram()
+            with patch.object(MailSource, "scan", return_value=[email(is_read=True)]) as scan, \
+                 patch("mail_digest.service.Classifier") as classifier, \
+                 patch("mail_digest.service.Telegram", return_value=telegram):
+                run(cfg)
+            classifier.assert_not_called()
+            scan.assert_called_once()
+            self.assertEqual(telegram.calls, ["message"])
+            store = Store(cfg.state_dir / "state.sqlite3")
+            self.assertEqual(store.cached_ids(), set())
+            store.db.close()
+
+    def test_old_unread_important_mail_reuses_cache_for_notification(self):
+        with tempfile.TemporaryDirectory() as folder:
+            cfg = config(folder)
+            cfg.state_dir.mkdir()
+            store = Store(cfg.state_dir / "state.sqlite3")
+            store.cache([email()], [analysis(email())])
+            with store.db:
+                store.db.execute("UPDATE emails SET reported=1")
+                store.put("scan_until", "2026-10-13T00:00:00+00:00")
+            store.db.close()
+            telegram = FakeTelegram()
+            with patch.object(MailSource, "scan", return_value=[email()]), \
+                 patch.object(MailSource, "refresh", return_value={email()["id"]: False}), \
+                 patch("mail_digest.service.Classifier") as classifier, \
+                 patch("mail_digest.service.Telegram", return_value=telegram):
+                run(cfg)
+            classifier.assert_not_called()
+            self.assertEqual(telegram.calls, ["message"])
+            self.assertIn("其中重要邮件 1 封", telegram.messages[0])
+            self.assertIn("Billing", telegram.messages[0])
+
+    def test_only_unclassified_unread_mail_is_analyzed_even_when_older_than_checkpoint(self):
+        with tempfile.TemporaryDirectory() as folder:
+            cfg = config(folder)
+            cfg.state_dir.mkdir()
+            store = Store(cfg.state_dir / "state.sqlite3")
+            with store.db:
+                store.put("scan_until", "2026-10-13T00:00:00+00:00")
+            store.db.close()
+            unread = email()
+            read = email(2, is_read=True)
+            telegram = FakeTelegram()
+            with patch.object(MailSource, "scan", side_effect=[[read, unread], []]) as scan, \
+                 patch.object(MailSource, "refresh", return_value={unread["id"]: False}), \
+                 patch.object(Classifier, "classify", return_value=[analysis(unread)]) as classify, \
+                 patch("mail_digest.service.Telegram", return_value=telegram):
+                run(cfg)
+            classify.assert_called_once_with([unread], [])
+            self.assertIsNone(scan.call_args_list[0].args[0])
+            self.assertTrue(scan.call_args_list[0].kwargs["unread_only"])
+            self.assertEqual(telegram.calls, ["message", "document"])
+
+    def test_empty_dry_run_does_not_send_or_advance_checkpoint(self):
+        with tempfile.TemporaryDirectory() as folder:
+            cfg = config(folder)
+            telegram = FakeTelegram()
+            with patch.object(MailSource, "scan", return_value=[]), \
+                 patch("mail_digest.service.Classifier") as classifier, \
+                 patch("mail_digest.service.Telegram", return_value=telegram):
+                run(cfg, dry_run=True)
+            classifier.assert_not_called()
+            self.assertEqual(telegram.calls, [])
+            store = Store(cfg.state_dir / "state.sqlite3")
+            self.assertIsNone(store.get("scan_until"))
+            self.assertIsNone(store.get("last_report_date"))
+            store.db.close()
+
+    def test_mail_read_during_classification_does_not_claim_agent_was_skipped(self):
+        with tempfile.TemporaryDirectory() as folder:
+            cfg = config(folder)
+            telegram = FakeTelegram()
+            with patch.object(MailSource, "scan", side_effect=[[email()], []]), \
+                 patch.object(MailSource, "refresh", return_value={email()["id"]: True}), \
+                 patch.object(Classifier, "classify", return_value=[analysis(email())]) as classify, \
+                 patch("mail_digest.service.Telegram", return_value=telegram):
+                run(cfg)
+            classify.assert_called_once()
+            self.assertEqual(telegram.calls, ["message", "document"])
+            self.assertNotIn("未启动 Agent", telegram.messages[0])
+            self.assertIn("状态：已读", telegram.messages[0])
 
     def test_already_sent_today_does_not_refetch_or_send(self):
         from datetime import datetime

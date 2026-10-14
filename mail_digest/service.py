@@ -18,7 +18,7 @@ import urllib.parse
 import urllib.request
 import uuid
 from dataclasses import dataclass
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, datetime
 from email.utils import parseaddr
 from html.parser import HTMLParser
 from pathlib import Path
@@ -151,7 +151,8 @@ class MailSource:
             time.sleep(2 ** attempt)
         raise DigestError("mail_fetch_failed")
 
-    def scan(self, since: str | None, until: str, direction: str = "inbound") -> list[dict[str, Any]]:
+    def scan(self, since: str | None, until: str, direction: str = "inbound",
+             *, unread_only: bool = False) -> list[dict[str, Any]]:
         rows: list[dict[str, Any]] = []
         cursor: tuple[str, str] | None = None
         while True:
@@ -160,6 +161,8 @@ class MailSource:
                       "order": "created_at.asc,id.asc", "limit": "100"}
             if since:
                 params["and"] = f"(created_at.gte.{since})"
+            if unread_only:
+                params["is_read"] = "eq.false"
             if cursor:
                 params["or"] = (f"(created_at.gt.{cursor[0]},"
                                 f"and(created_at.eq.{cursor[0]},id.gt.{cursor[1]}))")
@@ -432,6 +435,24 @@ def render(records: list[dict[str, Any]], date: str, bootstrap: bool) -> tuple[s
     return "\n\n".join(lines), full
 
 
+def render_reminder(records: list[dict[str, Any]], date: str, unread_count: int) -> str:
+    important = [record for record in records if not record["source"]["is_read"]
+                 and record["analysis"]["priority"] in {"P0", "P1"}]
+    important.sort(key=lambda record: (record["analysis"]["priority"],
+                                      -parse_time(record["source"]["created_at"]).timestamp()))
+    lines = [f"📬 邮件提醒 · {date}", "没有新增待分析的未读邮件，今天未启动 Agent。",
+             f"当前未读邮件 {unread_count} 封，其中重要邮件 {len(important)} 封。"]
+    if important:
+        lines.append("待阅读的重要邮件：")
+        lines.extend(f"• {PRIORITIES[record['analysis']['priority']]}："
+                     f"{short(record['source']['subject'], 100)}"
+                     f"（{short(record['source']['from_email'], 80)}）"
+                     for record in important[:8])
+        if len(important) > 8:
+            lines.append(f"另有 {len(important) - 8} 封，请到管理后台查看。")
+    return "\n".join(lines)
+
+
 def split_message(text: str, limit: int = 3500) -> list[str]:
     # Telegram limits UTF-16 units, not Python Unicode code points.
     parts, current, size = [], [], 0
@@ -492,7 +513,8 @@ def deliver(store: Store, telegram: Telegram) -> None:
         raise DigestError("outbox_requires_delivery_confirmation")
     payload = json.loads(row["payload"])
     parts = split_message(payload["summary"])
-    for index in range(row["next_part"], len(parts) + 1):
+    total_parts = len(parts) + bool(payload.get("full_report"))
+    for index in range(row["next_part"], total_parts):
         # Persist before the network call: a process crash cannot silently resend it.
         with store.db:
             store.db.execute("UPDATE outbox SET status='uncertain' WHERE id=?", (row["id"],))
@@ -509,7 +531,7 @@ def deliver(store: Store, telegram: Telegram) -> None:
             store.db.execute("UPDATE outbox SET next_part=?,status='pending' WHERE id=?", (index + 1, row["id"]))
             store.put("last_telegram_message_id", str(mid))
         LOG.info("telegram_ack part=%d message_id=%d", index + 1, mid)
-        if index < len(parts):
+        if index + 1 < total_parts:
             # Stay below Telegram's per-chat message rate for long bootstrap reports.
             time.sleep(1.1)
     with store.db:
@@ -549,12 +571,11 @@ def run(config: Config, *, dry_run: bool = False, force: bool = False) -> None:
                 return
             until = stamp(datetime.now(UTC))
             previous = store.get("scan_until")
-            since = stamp(parse_time(previous) - timedelta(days=2)) if previous else None
             source = MailSource(config)
-            mails = source.scan(since, until)
+            mails = source.scan(None, until, unread_only=True)
             cached = store.cached_ids()
-            fresh = [row for row in mails if row["id"] not in cached]
-            LOG.info("mail_scan inbound=%d new=%d bootstrap=%s", len(mails), len(fresh), not previous)
+            fresh = [row for row in mails if not row["is_read"] and row["id"] not in cached]
+            LOG.info("mail_scan unread=%d unclassified_unread=%d bootstrap=%s", len(mails), len(fresh), not previous)
             if fresh:
                 reply_start = min(row["created_at"] for row in fresh)
                 replies = source.scan(reply_start, until, "outbound")
@@ -563,15 +584,25 @@ def run(config: Config, *, dry_run: bool = False, force: bool = False) -> None:
                     batch = fresh[offset:offset + config.batch_size]
                     store.cache(batch, classifier.classify(batch, replies))
                     LOG.info("classified count=%d/%d", min(offset + len(batch), len(fresh)), len(fresh))
+            else:
+                LOG.info("agent_skipped no_unclassified_unread")
             flags = {row["id"]: bool(row["is_read"]) for row in mails}
-            important_ids = [r["source"]["id"] for r in store.records()
-                             if r["analysis"]["priority"] in {"P0", "P1"}]
-            flags.update(source.refresh(important_ids))
+            refresh_ids = [r["source"]["id"] for r in store.records()
+                           if not r["reported"] or r["analysis"]["priority"] in {"P0", "P1"}]
+            flags.update(source.refresh(refresh_ids))
             store.update_read(flags, {row["id"]: clean_body(row)[1] for row in mails})
             records = store.records()
-            summary, full = render(records, today, not previous)
+            fresh_ids = {row["id"] for row in fresh}
+            report_records = [record for record in records
+                              if record["reported"] or not record["source"]["is_read"]
+                              or record["source"]["id"] in fresh_ids]
+            if any(not record["reported"] for record in report_records):
+                summary, full = render(report_records, today, not previous)
+            else:
+                summary = render_reminder(records, today, sum(not row["is_read"] for row in mails))
+                full = None
             report_path = config.state_dir / "latest-report.txt"
-            report_path.write_text(full, encoding="utf-8")
+            report_path.write_text(full or summary, encoding="utf-8")
             report_path.chmod(0o600)
             (config.state_dir / "latest-summary.txt").write_text(summary, encoding="utf-8")
             if dry_run:
