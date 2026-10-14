@@ -591,6 +591,7 @@ def main() -> None:
     parser = argparse.ArgumentParser(description="Read-only Codex mailbox digest")
     parser.add_argument("--dry-run", action="store_true", help="Classify/cache, do not send or advance checkpoint")
     parser.add_argument("--force", action="store_true", help="Create another report even if already sent today")
+    parser.add_argument("--alert-only", action="store_true", help="Notify about a systemd-level failure")
     parser.add_argument("--state-dir", type=Path, default=Path("/var/lib/mail-digest"),
                         help="State path for status/delivery-resolution commands")
     control = parser.add_mutually_exclusive_group()
@@ -603,6 +604,9 @@ def main() -> None:
             control_store(args.state_dir, args.delivery_decision)
             return
         config = Config.from_env()
+        if args.alert_only:
+            alert_failure(config, "systemd_service_failed")
+            return
         run(config, dry_run=args.dry_run, force=args.force)
     except DigestError as exc:
         LOG.error("digest_failed code=%s", exc)

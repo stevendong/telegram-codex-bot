@@ -8,7 +8,7 @@ from unittest.mock import patch
 
 from mail_digest.service import (
     AmbiguousDelivery, Classifier, Config, DigestError, MailSource, Store,
-    clean_body, control_store, deliver, render, run, split_message, validate_result,
+    alert_failure, clean_body, control_store, deliver, render, run, split_message, validate_result,
 )
 
 
@@ -279,6 +279,19 @@ class ControlTests(unittest.TestCase):
             self.assertEqual(store.pending()['next_part'], 1)
             self.assertEqual(store.pending()['status'], 'pending')
             store.db.close()
+
+    def test_failure_alert_is_sent_once_and_contains_no_credentials(self):
+        with tempfile.TemporaryDirectory() as folder:
+            cfg = config(folder)
+            cfg.state_dir.mkdir()
+            with patch('mail_digest.service.Telegram') as telegram:
+                alert_failure(cfg, 'codex_timeout')
+                alert_failure(cfg, 'systemd_service_failed')
+                self.assertEqual(telegram.return_value.message.call_count, 1)
+                text = telegram.return_value.message.call_args.args[0]
+                self.assertNotIn(cfg.db_key, text)
+                self.assertNotIn(cfg.telegram_token, text)
+                self.assertIn('codex_timeout', text)
 
 
 if __name__ == "__main__":

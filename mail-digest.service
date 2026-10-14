@@ -2,6 +2,7 @@
 Description=Daily Codex support mailbox triage and Telegram report
 After=network-online.target
 Wants=network-online.target
+OnFailure=mail-digest-alert.service
 StartLimitIntervalSec=2h
 StartLimitBurst=3
 
