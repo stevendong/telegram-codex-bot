@@ -129,6 +129,8 @@ class FakeTelegram:
 
 class DeliveryTests(unittest.TestCase):
     def setUp(self):
+        self.pacing = patch('mail_digest.service.time.sleep')
+        self.pacing.start()
         self.temp = tempfile.TemporaryDirectory()
         self.store = Store(Path(self.temp.name) / "state.sqlite3")
         self.store.cache([email()], [analysis(email())])
@@ -137,6 +139,7 @@ class DeliveryTests(unittest.TestCase):
         self.store.enqueue(self.payload)
 
     def tearDown(self):
+        self.pacing.stop()
         self.store.db.close()
         self.temp.cleanup()
 
@@ -172,6 +175,13 @@ class DeliveryTests(unittest.TestCase):
 
 
 class RunTests(unittest.TestCase):
+    def setUp(self):
+        self.pacing = patch('mail_digest.service.time.sleep')
+        self.pacing.start()
+
+    def tearDown(self):
+        self.pacing.stop()
+
     def test_dry_run_caches_and_sending_reuses_classifications(self):
         with tempfile.TemporaryDirectory() as folder:
             cfg = config(folder)

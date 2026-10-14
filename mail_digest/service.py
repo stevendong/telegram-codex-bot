@@ -509,6 +509,9 @@ def deliver(store: Store, telegram: Telegram) -> None:
             store.db.execute("UPDATE outbox SET next_part=?,status='pending' WHERE id=?", (index + 1, row["id"]))
             store.put("last_telegram_message_id", str(mid))
         LOG.info("telegram_ack part=%d message_id=%d", index + 1, mid)
+        if index < len(parts):
+            # Stay below Telegram's per-chat message rate for long bootstrap reports.
+            time.sleep(1.1)
     with store.db:
         for email_id in payload["email_ids"]:
             store.db.execute("UPDATE emails SET reported=1 WHERE id=?", (email_id,))
