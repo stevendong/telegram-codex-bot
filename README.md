@@ -142,3 +142,9 @@ python3 scripts/check-app-server.py
 - Bot Token 的环境文件权限应保持 `0600`。
 - `/purgeagent` 会永久删除 Codex thread，必须带 `confirm`。
 - `/reset` 会消耗 reset 重置卡，必须通过按钮二次确认。
+
+## 独立邮件日报服务
+
+`mail_digest` 通过独立 `mail-digest.service` / `mail-digest.timer` 读取收件箱、调用 Codex 分类并推送私人 Telegram 报告，默认北京时间每日 09:00。它使用只读邮箱访问和禁用工具的 Codex 分析，与交互 Bot 分别运行。
+
+[方案、运行状态和运维说明（Notion）](https://app.notion.com/p/3f92dbec685c81b1a8a4c4e8dcde81d4)
