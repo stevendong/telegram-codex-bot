@@ -17,8 +17,7 @@ PROGRESS_UPDATE_SECONDS = 8
 
 BOT_COMMANDS = [
     {"command": "agents", "description": "查看并切换 Agent"},
-    {"command": "models", "description": "查看当前账号可用模型"},
-    {"command": "effort", "description": "切换当前模型推理强度"},
+    {"command": "models", "description": "查看并切换模型和推理强度"},
     {"command": "status", "description": "查看当前账号状态和额度"},
     {"command": "threads", "description": "查看账号历史会话"},
     {"command": "clear", "description": "清除当前上下文并启动新会话"},
@@ -27,21 +26,18 @@ BOT_COMMANDS = [
     {"command": "forkagent", "description": "分叉当前 Agent"},
     {"command": "accounts", "description": "查看 Codex 登录账号"},
     {"command": "reset", "description": "选择并使用 reset 重置卡"},
-    {"command": "agent", "description": "切换当前 Agent"},
-    {"command": "model", "description": "切换当前 Agent 模型"},
     {"command": "renameagent", "description": "重命名 Agent"},
     {"command": "deleteagent", "description": "移除 Agent 别名"},
     {"command": "importagent", "description": "导入已有会话"},
     {"command": "purgeagent", "description": "永久删除 Agent"},
     {"command": "help", "description": "显示完整帮助"},
-    {"command": "start", "description": "打开帮助"},
 ]
 
 HELP = """Telegram Codex Bot
 
-/agents — 列出已命名的 Agent
+/agents — 查看并切换 Agent
 /accounts — 列出 Codex 登录账号
-/models — 列出当前账号可用模型
+/models — 查看并切换当前账号的模型和推理强度
 /model <模型ID|default> — 切换当前 Agent 模型
 /effort <档位|default> — 切换当前模型的推理强度
 /agent <名称> — 切换当前 Agent

@@ -80,7 +80,6 @@ class TelegramAPITests(unittest.IsolatedAsyncioTestCase):
             [
                 "agents",
                 "models",
-                "effort",
                 "status",
                 "threads",
                 "clear",
@@ -89,14 +88,11 @@ class TelegramAPITests(unittest.IsolatedAsyncioTestCase):
                 "forkagent",
                 "accounts",
                 "reset",
-                "agent",
-                "model",
                 "renameagent",
                 "deleteagent",
                 "importagent",
                 "purgeagent",
                 "help",
-                "start",
             ],
         )
 

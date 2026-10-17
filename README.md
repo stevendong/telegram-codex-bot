@@ -24,12 +24,11 @@
 
 ## Telegram 命令
 
-服务启动时会自动为所有私聊注册 Telegram 原生快捷命令菜单，并将聊天菜单按钮设为命令列表。
+服务启动时会自动为所有私聊注册 Telegram 原生快捷命令菜单，并将聊天菜单按钮设为命令列表。相同功能只保留一个菜单入口：`/agents` 用于查看和切换 Agent，`/models` 用于切换模型和推理强度，`/help` 用于打开完整帮助。
 
 ```text
 /agents
 /models
-/effort <档位|default>
 /status  # 当前 Agent、Codex 登录和额度/重置时间
 /threads [账号]
 /clear   # 清除当前上下文并立即启动新会话
@@ -38,14 +37,14 @@
 /forkagent <新名称>
 /accounts
 /reset   # 选择当前账号的 reset 重置卡
-/model <模型ID|default>
-/agent <名称>
 /renameagent <旧名称> <新名称>
 /deleteagent <名称>
 /importagent <名称> <thread_id> [账号]
 /purgeagent <名称> confirm
 /help
 ```
+
+菜单外仍支持手动发送 `/agent <名称>`、`/model <模型ID|default>`、`/effort <档位|default>` 和 `/start`。`/model`、`/effort` 不带参数时仍打开模型与推理强度面板；`/start` 仍显示帮助。
 
 `/deleteagent` 只删除 Telegram 别名，不删除 Codex 历史；`/purgeagent` 才会永久删除 thread。
 
