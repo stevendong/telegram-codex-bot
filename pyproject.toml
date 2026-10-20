@@ -12,6 +12,7 @@ dependencies = []
 [project.scripts]
 telegram-codex-bot = "telegram_codex_bot.__main__:main"
 mail-digest = "mail_digest.service:main"
+growth-digest = "growth_digest.service:main"
 
 [tool.setuptools.packages.find]
-include = ["telegram_codex_bot*", "mail_digest*"]
+include = ["telegram_codex_bot*", "mail_digest*", "growth_digest*"]

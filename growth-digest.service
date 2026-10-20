@@ -1,0 +1,44 @@
+[Unit]
+Description=Daily PDF2EPUB growth and anomaly analysis
+After=network-online.target
+Wants=network-online.target
+OnFailure=growth-digest-alert.service
+StartLimitIntervalSec=2h
+StartLimitBurst=3
+
+[Service]
+Type=oneshot
+User=ubuntu
+Group=ubuntu
+WorkingDirectory=/data/telegram-codex-bot
+Environment=PYTHONUNBUFFERED=1
+Environment=PATH=/home/ubuntu/.nvm/versions/node/v24.21.0/bin:/usr/bin:/bin
+EnvironmentFile=/etc/mail-digest.env
+EnvironmentFile=/etc/growth-digest.env
+ExecStart=/usr/bin/python3 -m growth_digest
+StateDirectory=growth-digest
+StateDirectoryMode=0700
+UMask=0077
+TimeoutStartSec=30min
+TimeoutStopSec=15s
+Restart=on-failure
+RestartSec=10min
+KillMode=control-group
+MemoryMax=768M
+MemorySwapMax=128M
+CPUQuota=40%
+TasksMax=64
+Nice=10
+IOSchedulingClass=idle
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectSystem=strict
+ProtectHome=read-only
+# Codex must retain OAuth refreshes in the existing protected credential store.
+# --ignore-user-config and disabled tools keep mailbox data away from host actions.
+ReadWritePaths=/home/ubuntu/.codex
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+RestrictSUIDSGID=yes
+

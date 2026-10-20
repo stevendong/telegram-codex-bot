@@ -262,13 +262,18 @@ class Classifier:
                            "is_read": row["is_read"], "body": text, "truncated": truncated,
                            "related_replies": [{"sent_at": r["created_at"], "body": clean_body(r, 3000)[0]}
                                                for r in related[-3:]]})
+        result = self.generate({"as_of": stamp(datetime.now(UTC)), "emails": inputs}, SCHEMA, INSTRUCTIONS)
+        return validate_result(result, [row["id"] for row in rows])
+
+    def generate(self, inputs: dict[str, Any], schema_spec: dict[str, Any], instructions: str) -> dict[str, Any]:
+        """Run one tool-free structured analysis with no inherited service secrets."""
         self.config.state_dir.mkdir(parents=True, exist_ok=True)
         with tempfile.TemporaryDirectory(prefix="classify-", dir=self.config.state_dir) as folder:
             work = Path(folder)
             if not (self.config.auth_home / "auth.json").is_file():
                 raise DigestError("codex_auth_unavailable")
             schema = work / "schema.json"
-            schema.write_text(json.dumps(SCHEMA))
+            schema.write_text(json.dumps(schema_spec))
             answer = work / "answer.json"
             env = {key: os.environ[key] for key in ["PATH", "LANG", "LC_ALL", "SSL_CERT_FILE", "SSL_CERT_DIR"]
                    if key in os.environ}
@@ -298,8 +303,7 @@ class Classifier:
                                         stdout=events, stderr=errors, text=True,
                                         start_new_session=True)
                 try:
-                    proc.communicate(INSTRUCTIONS + json.dumps({"as_of": stamp(datetime.now(UTC)),
-                                                               "emails": inputs}, ensure_ascii=False),
+                    proc.communicate(instructions + json.dumps(inputs, ensure_ascii=False),
                                      timeout=self.config.codex_timeout)
                 except subprocess.TimeoutExpired:
                     os.killpg(proc.pid, signal.SIGKILL)
@@ -317,7 +321,7 @@ class Classifier:
                 result = json.loads(answer.read_text())
             except (ValueError, OSError):
                 raise DigestError("codex_invalid_json") from None
-            return validate_result(result, [row["id"] for row in rows])
+            return result
 
 
 class Store:
@@ -469,6 +473,8 @@ def split_message(text: str, limit: int = 3500) -> list[str]:
 
 
 class Telegram:
+    document_prefix = "mail-digest"
+
     def __init__(self, config: Config):
         self.config = config
 
@@ -499,7 +505,7 @@ class Telegram:
         boundary = "maildigest" + uuid.uuid4().hex
         prefix = (f"--{boundary}\r\nContent-Disposition: form-data; name=\"chat_id\"\r\n\r\n"
                   f"{self.config.chat_id}\r\n--{boundary}\r\n"
-                  f"Content-Disposition: form-data; name=\"document\"; filename=\"mail-digest-{date}.txt\"\r\n"
+                  f"Content-Disposition: form-data; name=\"document\"; filename=\"{self.document_prefix}-{date}.txt\"\r\n"
                   "Content-Type: text/plain; charset=utf-8\r\n\r\n")
         body = prefix.encode() + text.encode() + f"\r\n--{boundary}--\r\n".encode()
         return self.call("sendDocument", body, "multipart/form-data; boundary=" + boundary)

@@ -1,0 +1,25 @@
+[Unit]
+Description=Private failure notification for the growth digest
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=ubuntu
+Group=ubuntu
+WorkingDirectory=/data/telegram-codex-bot
+EnvironmentFile=/etc/mail-digest.env
+EnvironmentFile=/etc/growth-digest.env
+ExecStart=/usr/bin/python3 -m growth_digest --alert-only
+StateDirectory=growth-digest
+StateDirectoryMode=0700
+UMask=0077
+TimeoutStartSec=60s
+MemoryMax=96M
+MemorySwapMax=0
+CPUQuota=10%
+TasksMax=8
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectSystem=strict
+ProtectHome=read-only
