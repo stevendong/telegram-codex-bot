@@ -144,7 +144,7 @@ python3 scripts/check-app-server.py
 
 ## 独立邮件日报服务
 
-`mail_digest` 通过独立 `mail-digest.service` / `mail-digest.timer` 读取收件箱、调用 Codex 分类并推送私人 Telegram 报告，默认北京时间每日 08:00 开始处理，完成后发送通知。它使用只读邮箱访问和禁用工具的 Codex 分析，与交互 Bot 分别运行。
+`mail_digest` 通过独立 `mail-digest.service` / `mail-digest.timer` 读取收件箱、调用 Codex 分类并推送私人 Telegram 报告，默认北京时间每日 07:00 开始处理，完成后发送通知。它使用只读邮箱访问和禁用工具的 Codex 分析，与交互 Bot 分别运行。
 
 每日先检查当前未读邮件，仅对未读且尚未分类的邮件启动 Agent；已读邮件跳过，已分类的历史邮件不重复分析。检查覆盖所有未读邮件，因此较早的邮件之后被重新标为未读也不会遗漏。没有新增待分析邮件且没有尚待发送的分类结果时，只发送简短通知及缓存中的重要未读提醒，不发送空报告附件；通知仍保留送达确认、防重发和每日去重。
 
@@ -152,6 +152,6 @@ python3 scripts/check-app-server.py
 
 ## 增长与异常分析日报
 
-`growth_digest` 独立定时统计 PDF2EPUB 前一完整自然日，由程序计算指标与异常规则、Codex 解读，通过现有私人 Telegram 发送简报和完整 TXT 附件，并更新专用 Notion 报告页。默认北京时间每天 08:15 开始；独立状态、资源限制及送达确认，不需要重启交互 Bot 或主站。
+`growth_digest` 独立定时统计 PDF2EPUB 前一完整自然日，由程序计算指标与异常规则、Codex 解读，通过现有私人 Telegram 发送简报和完整 TXT 附件，并更新专用 Notion 报告页。默认北京时间每天 07:00 开始；独立状态、资源限制及送达确认，不需要重启交互 Bot 或主站。
 
 [方案、指标口径、日报和运维说明（Notion）](https://app.notion.com/p/3ff2dbec685c818f8c9fc740011cebcf)

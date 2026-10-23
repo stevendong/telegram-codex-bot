@@ -1,8 +1,8 @@
 [Unit]
-Description=PDF2EPUB growth report at 08:15 Asia/Shanghai every day
+Description=PDF2EPUB growth report at 07:00 Asia/Shanghai every day
 
 [Timer]
-OnCalendar=*-*-* 08:15:00 Asia/Shanghai
+OnCalendar=*-*-* 07:00:00 Asia/Shanghai
 Persistent=true
 AccuracySec=1min
 Unit=growth-digest.service
