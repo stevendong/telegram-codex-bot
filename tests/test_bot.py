@@ -99,6 +99,10 @@ class _FakeModelService(_FakeService):
     async def get_account_status(self, account: str) -> dict[str, Any]:
         return {"name": account, "logged_in": False}
 
+    async def get_agent_context(self, user_id: int, name: str) -> dict[str, Any]:
+        assert user_id == 42 and name == "main"
+        return {"used_tokens": 46068, "window_tokens": 475000}
+
 
 class _FakeResetService(_FakeService):
     def __init__(self) -> None:
@@ -263,6 +267,10 @@ class BotCallbackTests(unittest.IsolatedAsyncioTestCase):
             self.assertIn("Fast 模式：开启", telegram.calls[-2][1]["text"])
             await bot._handle_command(42, 42, "status", [])
             self.assertIn("Fast 模式：开启", telegram.calls[-1][1]["text"])
+            self.assertIn(
+                "Context：46,068 / 475,000 tokens（剩余 90.3%）",
+                telegram.calls[-1][1]["text"],
+            )
             state.create_agent(42, "other")
             await bot._handle_update({"callback_query": query})
             self.assertFalse(state.get_agent(42, "other")["fast"])

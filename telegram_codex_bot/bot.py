@@ -495,12 +495,13 @@ class TelegramCodexBot:
             agent = self.state.get_agent(user_id, name) or {}
             account = str(agent.get("account") or self.config.default_account)
             account_status = await self.service.get_account_status(account)
+            context_usage = await self.service.get_agent_context(user_id, name)
             agent["effective_model"] = (
                 agent.get("model") or self.config.codex_model or "账号默认模型"
             )
             await self.telegram.send_message(
                 chat_id,
-                format_status(name, agent, account_status),
+                format_status(name, agent, account_status, context_usage),
             )
         elif command == "reset":
             text, markup = await self._reset_picker(user_id)
@@ -1040,6 +1041,7 @@ def format_status(
     name: str,
     agent: dict[str, Any],
     account_status: dict[str, Any],
+    context_usage: dict[str, Any] | None = None,
 ) -> str:
     account_name = str(
         account_status.get("name") or agent.get("account") or "unknown"
@@ -1054,6 +1056,20 @@ def format_status(
         f"任务状态：{agent.get('status', 'idle')}",
         f"Thread：{thread_id}",
     ]
+    if context_usage is not None:
+        used = context_usage["used_tokens"]
+        window = context_usage.get("window_tokens")
+        if window:
+            remaining = max(0.0, min(100.0, (1 - used / window) * 100))
+            lines.append(
+                f"Context：{used:,} / {window:,} tokens（剩余 {remaining:.1f}%）"
+            )
+        else:
+            lines.append(f"Context：已用 {used:,} tokens（窗口上限未知）")
+    elif not agent.get("thread_id"):
+        lines.append("Context：尚未创建会话")
+    else:
+        lines.append("Context：暂无用量数据")
 
     if not account_status.get("logged_in"):
         lines.append("登录状态：未登录")

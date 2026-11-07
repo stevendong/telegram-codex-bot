@@ -6,10 +6,12 @@ import re
 import time
 import uuid
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Any
 
 from .app_server import AppServerError, CodexAppServer
 from .config import Config
+from .context_usage import normalize_context_usage, read_context_usage
 from .state import StateStore
 
 AGENT_NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._+@-]{0,31}$")
@@ -84,6 +86,7 @@ class AgentService:
                 )
             )
         self._loaded_threads: set[tuple[str, str]] = set()
+        self._context_usage: dict[tuple[str, str], dict[str, int | None]] = {}
         self._runs: dict[tuple[str, str], _TurnRun] = {}
         self._agent_runs: dict[tuple[int, str], _TurnRun] = {}
         self._locks: dict[tuple[int, str], asyncio.Lock] = {}
@@ -178,6 +181,36 @@ class AgentService:
                 exc, AccountAuthenticationError
             )
         return status
+
+    async def get_agent_context(
+        self, user_id: int, name: str
+    ) -> dict[str, int | None] | None:
+        agent = self.state.get_agent(user_id, name)
+        if not agent or not agent.get("thread_id"):
+            return None
+        account = str(agent.get("account") or self.config.default_account)
+        thread_id = str(agent["thread_id"])
+        key = (account, thread_id)
+        if key in self._context_usage:
+            return dict(self._context_usage[key])
+        # thread/read does not resume a session or acquire its writer lock.
+        # Persisted telemetry also covers imported sessions and bot restarts.
+        try:
+            response = await self._app(account).request(
+                "thread/read", {"threadId": thread_id, "includeTurns": False}
+            )
+            path = (response.get("thread") or {}).get("path")
+            usage = (
+                await asyncio.to_thread(read_context_usage, Path(path)) if path else None
+            )
+        except Exception:
+            LOG.warning(
+                "Could not read context usage for %s/%s", account, thread_id,
+                exc_info=True,
+            )
+            usage = None
+        # A live notification received during the disk read is newer.
+        return self._context_usage.get(key, usage)
 
     async def _read_rate_limits(self, account: str) -> dict[str, Any]:
         app = self._app(account)
@@ -728,6 +761,14 @@ class AgentService:
         self, account: str, method: str, params: dict[str, Any]
     ) -> None:
         thread_id = params.get("threadId")
+        if method == "thread/tokenUsage/updated":
+            raw_usage = params.get("tokenUsage")
+            usage = (
+                normalize_context_usage(raw_usage) if isinstance(raw_usage, dict) else None
+            )
+            if thread_id and usage is not None:
+                self._context_usage[(account, str(thread_id))] = usage
+            return
         run = (
             self._runs.get((account, str(thread_id)))
             if thread_id
