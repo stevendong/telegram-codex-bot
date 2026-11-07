@@ -21,13 +21,14 @@ class StateStoreTests(unittest.TestCase):
         self.state.ensure_default(42)
         self.assertEqual(self.state.get_active_name(42), "main")
         self.state.update_agent(
-            42, "main", thread_id="thr_1", effort="high"
+            42, "main", thread_id="thr_1", effort="high", fast=True
         )
 
         reloaded = StateStore(self.path)
         self.assertEqual(reloaded.get_agent(42, "main")["thread_id"], "thr_1")
         self.assertIsNone(reloaded.get_agent(42, "main")["model"])
         self.assertEqual(reloaded.get_agent(42, "main")["effort"], "high")
+        self.assertTrue(reloaded.get_agent(42, "main")["fast"])
         self.assertEqual(self.path.stat().st_mode & 0o777, 0o600)
 
     def test_switch_rename_and_detach(self) -> None:
@@ -38,6 +39,13 @@ class StateStoreTests(unittest.TestCase):
         self.assertEqual(self.state.get_active_name(42), "audit")
         removed = self.state.detach_agent(42, "audit")
         self.assertEqual(removed["thread_id"], "thr_2")
+
+    def test_legacy_agents_default_to_fast_off(self) -> None:
+        self.state.ensure_default(42)
+        data = json.loads(self.path.read_text())
+        del data["users"]["42"]["agents"]["main"]["fast"]
+        self.path.write_text(json.dumps(data))
+        self.assertFalse(StateStore(self.path).get_agent(42, "main")["fast"])
 
     def test_running_state_is_recovered_as_idle(self) -> None:
         self.state.ensure_default(42)

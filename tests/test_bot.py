@@ -91,6 +91,14 @@ class _FakeModelService(_FakeService):
         self.state.update_agent(user_id, name, effort=selected)
         return selected
 
+    async def set_agent_fast(self, user_id: int, name: str, mode: str) -> bool:
+        enabled = mode == "on"
+        self.state.update_agent(user_id, name, fast=enabled)
+        return enabled
+
+    async def get_account_status(self, account: str) -> dict[str, Any]:
+        return {"name": account, "logged_in": False}
+
 
 class _FakeResetService(_FakeService):
     def __init__(self) -> None:
@@ -231,6 +239,35 @@ class _ProgressTelegramAPI(_RecordingTelegramAPI):
 
 
 class BotCallbackTests(unittest.IsolatedAsyncioTestCase):
+    async def test_fast_command_buttons_status_and_stale_agent(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            state = StateStore(Path(temp) / "state.json")
+            state.ensure_default(42)
+            config = SimpleNamespace(
+                allowed_user_ids=frozenset({42}), default_account="default",
+                codex_model=None,
+            )
+            telegram = _RecordingTelegramAPI()
+            bot = TelegramCodexBot(config, state, _FakeModelService(state), telegram)
+            for mode, label in (([], "关闭"), (["on"], "开启"), (["off"], "关闭")):
+                await bot._handle_command(42, 42, "fast", mode)
+                self.assertIn(f"Fast 模式：{label}", telegram.calls[-1][1]["text"])
+            button = telegram.calls[-1][1]["reply_markup"]["inline_keyboard"][0][0]
+            query = {
+                "id": "fast-query", "from": {"id": 42},
+                "message": {"message_id": 8, "chat": {"id": 42, "type": "private"}},
+                "data": button["callback_data"],
+            }
+            await bot._handle_update({"callback_query": query})
+            self.assertTrue(state.get_agent(42, "main")["fast"])
+            self.assertIn("Fast 模式：开启", telegram.calls[-2][1]["text"])
+            await bot._handle_command(42, 42, "status", [])
+            self.assertIn("Fast 模式：开启", telegram.calls[-1][1]["text"])
+            state.create_agent(42, "other")
+            await bot._handle_update({"callback_query": query})
+            self.assertFalse(state.get_agent(42, "other")["fast"])
+            self.assertIn("当前 Agent 已改变", telegram.calls[-1][1]["text"])
+
     async def test_progress_card_updates_and_interrupt_button_stops_turn(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
             state = StateStore(Path(temp) / "state.json")

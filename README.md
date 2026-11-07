@@ -8,6 +8,7 @@
 - 同时连接多套 Codex 登录，并通过 Agent 名称切换账号
 - 自动以登录邮箱的前 10 个字符命名每套账号的主 Agent
 - 按 Agent 查看并切换账号实际可用的 Codex 模型和 reasoning effort
+- 按 Agent 开关 Fast 模式，并在 `/status` 查看当前设置
 - 查看、选择并使用账号可用的 reset 重置卡（二次确认）
 - 每个 Agent 保留独立上下文
 - Agent 回答使用 Telegram Rich Markdown 渲染标题、列表、代码、表格和公式
@@ -29,6 +30,7 @@
 ```text
 /agents
 /models
+/fast [on|off]  # 查看按钮面板，或直接开启/关闭 Fast 模式
 /status  # 当前 Agent、Codex 登录和额度/重置时间
 /threads [账号]
 /clear   # 清除当前上下文并立即启动新会话
@@ -51,6 +53,8 @@
 `/threads [账号]` 会列出最近的历史会话并提供点击切换按钮。已绑定的会话会直接切换到对应 Agent；未绑定会话默认连接当前 Agent，查看其他账号时则连接该账号的主 Agent。切换不会删除原会话；如果原 thread 正被命令行或其他 Codex 进程写入，Bot 会自动分叉其已保存上下文并切换到新 thread，避免并发写入冲突。
 
 `/agents` 会在每个 Agent 下显示其账号的短期和长期剩余 Usage 及对应重置时间，并提供可直接点击的切换按钮；多个 Agent 属于同一账号时只查询一次额度。`/models` 会实时读取当前 Agent 所属账号可用的模型及 reasoning effort，并提供模型和 Effort 切换按钮；`/model <模型ID>` 与 `/effort <档位>` 也可用于文字切换。选择会按 Agent 持久化，并从下一次任务起生效；`default` 可分别恢复账号默认模型或所选模型的默认 Effort。切换模型时，不受新模型支持的 Effort 会自动恢复默认值。
+
+`/fast` 打开当前 Agent 的 Fast 开关面板，也可发送 `/fast on` 或 `/fast off` 直接切换。设置按 Agent 独立保存，默认关闭，从下一次任务起生效；运行中请先完成或停止任务再切换。`/status` 显示当前 Fast 设置。开启前会检查账号模型目录中的 Fast 支持；切换到不支持 Fast 的模型时自动关闭。分叉会继承开关，清除上下文和切换历史会话会保留开关；关闭时明确使用普通速度，不继承历史会话的速度档位。
 
 `/reset` 会读取当前 Agent 所属账号的可用重置卡。先选择卡片，再点击“确认使用”才会调用 Codex；卡片 ID 不会显示在 Telegram 中，选择按钮 10 分钟后失效。
 

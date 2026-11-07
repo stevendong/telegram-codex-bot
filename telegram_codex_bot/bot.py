@@ -18,6 +18,7 @@ PROGRESS_UPDATE_SECONDS = 8
 BOT_COMMANDS = [
     {"command": "agents", "description": "查看并切换 Agent"},
     {"command": "models", "description": "查看并切换模型和推理强度"},
+    {"command": "fast", "description": "查看并切换 Fast 模式"},
     {"command": "status", "description": "查看当前账号状态和额度"},
     {"command": "threads", "description": "查看账号历史会话"},
     {"command": "clear", "description": "清除当前上下文并启动新会话"},
@@ -40,6 +41,7 @@ HELP = """Telegram Codex Bot
 /models — 查看并切换当前账号的模型和推理强度
 /model <模型ID|default> — 切换当前 Agent 模型
 /effort <档位|default> — 切换当前模型的推理强度
+/fast [on|off] — 查看或开关当前 Agent 的 Fast 模式
 /agent <名称> — 切换当前 Agent
 /newagent <名称> [账号] — 创建独立 Agent
 /forkagent <名称> — 从当前 Agent 分叉
@@ -209,6 +211,22 @@ class TelegramCodexBot:
                 text, markup = await self._agent_picker(user_id)
                 await self._edit_or_send(chat_id, message_id, text, markup)
                 await self._answer_callback(query_id, f"已切换到 Agent：{name}")
+                return
+            if data.startswith("fast:"):
+                payload = data.removeprefix("fast:")
+                if ":" not in payload:
+                    raise ValueError("Fast 按钮已过期，请重新发送 /fast")
+                target_name, requested = payload.split(":", 1)
+                target_name = normalize_agent_name(target_name)
+                name = self.state.get_active_name(user_id)
+                if target_name != name:
+                    raise ValueError("当前 Agent 已改变，请重新发送 /fast")
+                enabled = await self.service.set_agent_fast(user_id, name, requested)
+                text, markup = self._fast_picker(user_id)
+                await self._edit_or_send(chat_id, message_id, text, markup)
+                await self._answer_callback(
+                    query_id, f"Fast 模式已{'开启' if enabled else '关闭'}"
+                )
                 return
             if data.startswith("model:"):
                 payload = data.removeprefix("model:")
@@ -398,6 +416,14 @@ class TelegramCodexBot:
             await self.telegram.send_message(
                 chat_id, text, reply_markup=markup
             )
+        elif command == "fast":
+            name = self.state.get_active_name(user_id)
+            if len(args) > 1:
+                raise ValueError("用法：/fast [on|off]")
+            if args:
+                await self.service.set_agent_fast(user_id, name, args[0])
+            text, markup = self._fast_picker(user_id)
+            await self.telegram.send_message(chat_id, text, reply_markup=markup)
         elif command == "agent":
             self._require_args(args, 1, "/agent <名称>")
             name = normalize_agent_name(args[0])
@@ -684,6 +710,27 @@ class TelegramCodexBot:
             )
         lines.append("\n点击按钮即可切换：")
         return "\n".join(lines), {"inline_keyboard": _button_rows(buttons)}
+
+    def _fast_picker(self, user_id: int) -> tuple[str, dict[str, Any]]:
+        name = self.state.get_active_name(user_id)
+        agent = self.state.get_agent(user_id, name) or {}
+        enabled = bool(agent.get("fast"))
+        text = (
+            f"Agent：{name}\nFast 模式：{'开启' if enabled else '关闭'}\n\n"
+            "点击按钮切换，下次任务起生效。"
+        )
+        return text, {
+            "inline_keyboard": [[
+                {
+                    "text": f"{'✅ ' if enabled else ''}开启 Fast",
+                    "callback_data": "noop" if enabled else f"fast:{name}:on",
+                },
+                {
+                    "text": f"{'✅ ' if not enabled else ''}关闭 Fast",
+                    "callback_data": f"fast:{name}:off" if enabled else "noop",
+                },
+            ]]
+        }
 
     async def _model_picker(
         self, user_id: int
@@ -1003,6 +1050,7 @@ def format_status(
         f"Codex 账号：{account_name}",
         f"模型：{agent.get('effective_model') or agent.get('model') or '账号默认模型'}",
         f"Effort：{agent.get('effort') or '模型默认'}",
+        f"Fast 模式：{'开启' if agent.get('fast') else '关闭'}",
         f"任务状态：{agent.get('status', 'idle')}",
         f"Thread：{thread_id}",
     ]

@@ -91,12 +91,15 @@ class AgentService:
         self._semaphore = asyncio.Semaphore(config.max_parallel_turns)
         self._account_aliases = {name: name for name in apps}
 
-    def _thread_params(self, model: str | None = None) -> dict[str, Any]:
+    def _thread_params(
+        self, model: str | None = None, fast: bool = False
+    ) -> dict[str, Any]:
         params: dict[str, Any] = {
             "cwd": str(self.config.codex_cwd),
             "approvalPolicy": "never",
             "sandbox": self.config.codex_sandbox,
             "serviceName": "telegram_codex_bot",
+            "serviceTier": "fast" if fast else "default",
         }
         selected_model = model or self.config.codex_model
         if selected_model:
@@ -288,7 +291,10 @@ class AgentService:
         }
         current_effort = str(agent.get("effort") or "")
         effort = supported_efforts.get(current_effort.lower())
-        self.state.update_agent(user_id, name, model=model, effort=effort)
+        self.state.update_agent(
+            user_id, name, model=model, effort=effort,
+            fast=bool(agent.get("fast")) and self._supports_fast(match),
+        )
         return model
 
     async def set_agent_effort(
@@ -339,6 +345,47 @@ class AgentService:
                 )
         self.state.update_agent(user_id, name, effort=effort)
         return effort
+
+    async def set_agent_fast(
+        self, user_id: int, name: str, raw_mode: str
+    ) -> bool:
+        agent = self.state.get_agent(user_id, name)
+        if not agent:
+            raise KeyError(name)
+        lock = self._locks.get((user_id, name))
+        if agent.get("status") == "running" or (lock and lock.locked()):
+            raise ValueError("Agent 正在运行，请完成或停止后再切换 Fast 模式")
+        mode = raw_mode.strip().lower()
+        if mode not in {"on", "off"}:
+            raise ValueError("用法：/fast [on|off]")
+        enabled = mode == "on"
+        if enabled:
+            account = str(agent.get("account") or self.config.default_account)
+            models = await self.list_models(account)
+            # Catalog reads can yield to a task start or a model change.
+            agent = self.state.get_agent(user_id, name)
+            if not agent:
+                raise KeyError(name)
+            lock = self._locks.get((user_id, name))
+            if agent.get("status") == "running" or (lock and lock.locked()):
+                raise ValueError("Agent 正在运行，请完成或停止后再切换 Fast 模式")
+            selected = agent.get("model") or self.config.codex_model
+            model = next(
+                (item for item in models if item.get("model") == selected), None
+            ) if selected else next(
+                (item for item in models if item.get("isDefault")), None
+            )
+            if not model or not self._supports_fast(model):
+                raise ValueError("当前账号或模型不支持 Fast 模式，请通过 /models 查看可用模型")
+        self.state.update_agent(user_id, name, fast=enabled)
+        return enabled
+
+    @staticmethod
+    def _supports_fast(model: dict[str, Any]) -> bool:
+        return "fast" in (model.get("additionalSpeedTiers") or []) or any(
+            (tier.get("id") if isinstance(tier, dict) else tier) in {"fast", "priority"}
+            for tier in model.get("serviceTiers") or []
+        )
 
     @staticmethod
     def _supported_efforts(model: dict[str, Any]) -> list[str]:
@@ -403,12 +450,13 @@ class AgentService:
         app = self._app(account)
         model = source.get("model")
         effort = source.get("effort")
-        params = {"threadId": source["thread_id"], **self._thread_params(model)}
+        fast = source.get("fast", False)
+        params = {"threadId": source["thread_id"], **self._thread_params(model, fast)}
         result = await app.request("thread/fork", params)
         thread_id = str(result["thread"]["id"])
         self._loaded_threads.add((account, thread_id))
         self.state.create_agent(user_id, name, thread_id, account=account)
-        self.state.update_agent(user_id, name, model=model, effort=effort)
+        self.state.update_agent(user_id, name, model=model, effort=effort, fast=fast)
         return name
 
     async def list_server_threads(
@@ -454,7 +502,7 @@ class AgentService:
             app = self._app(account)
             params = {
                 "threadId": thread_id,
-                **self._thread_params(agent.get("model")),
+                **self._thread_params(agent.get("model"), agent.get("fast", False)),
             }
             selected_thread_id = thread_id
             outcome = "resumed"
@@ -509,6 +557,7 @@ class AgentService:
                 if selected_model:
                     turn_params["model"] = selected_model
                 turn_params["effort"] = agent.get("effort")
+                turn_params["serviceTier"] = "fast" if agent.get("fast") else "default"
                 response = await app.request("turn/start", turn_params)
                 run.turn_id = str(response["turn"]["id"])
                 self.state.update_agent(user_id, name, active_turn_id=run.turn_id)
@@ -622,7 +671,8 @@ class AgentService:
             old_thread_id = agent.get("thread_id")
             app = self._app(account)
             result = await app.request(
-                "thread/start", self._thread_params(agent.get("model"))
+                "thread/start",
+                self._thread_params(agent.get("model"), agent.get("fast", False)),
             )
             new_thread_id = str(result["thread"]["id"])
             self.state.update_agent(
@@ -660,15 +710,16 @@ class AgentService:
         account = str(agent.get("account") or self.config.default_account)
         app = self._app(account)
         model = agent.get("model")
+        fast = agent.get("fast", False)
         thread_id = agent.get("thread_id")
         if not thread_id:
-            result = await app.request("thread/start", self._thread_params(model))
+            result = await app.request("thread/start", self._thread_params(model, fast))
             thread_id = str(result["thread"]["id"])
             self.state.update_agent(user_id, name, thread_id=thread_id)
             self._loaded_threads.add((account, thread_id))
             return account, thread_id
         if (account, thread_id) not in self._loaded_threads:
-            params = {"threadId": thread_id, **self._thread_params(model)}
+            params = {"threadId": thread_id, **self._thread_params(model, fast)}
             await app.request("thread/resume", params)
             self._loaded_threads.add((account, thread_id))
         return account, str(thread_id)

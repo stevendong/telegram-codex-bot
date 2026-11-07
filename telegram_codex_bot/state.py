@@ -37,6 +37,7 @@ class StateStore:
                     agent.setdefault("account", "default")
                     agent.setdefault("model", None)
                     agent.setdefault("effort", None)
+                    agent.setdefault("fast", False)
                     if agent.get("status") == "running":
                         agent["status"] = "idle"
                         agent["active_turn_id"] = None
@@ -70,6 +71,7 @@ class StateStore:
                     "account_primary": True,
                     "model": None,
                     "effort": None,
+                    "fast": False,
                     "thread_id": None,
                     "status": "idle",
                     "active_turn_id": None,
@@ -125,6 +127,7 @@ class StateStore:
                         "account_primary": True,
                         "model": None,
                         "effort": None,
+                        "fast": False,
                         "thread_id": None,
                         "status": "idle",
                         "active_turn_id": None,
@@ -159,6 +162,7 @@ class StateStore:
                     "account_primary": True,
                     "model": None,
                     "effort": None,
+                    "fast": False,
                     "thread_id": None,
                     "status": "idle",
                     "active_turn_id": None,
@@ -189,6 +193,7 @@ class StateStore:
                 "account_primary": False,
                 "model": None,
                 "effort": None,
+                "fast": False,
                 "thread_id": thread_id,
                 "status": "idle",
                 "active_turn_id": None,

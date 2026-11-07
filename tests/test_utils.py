@@ -74,6 +74,7 @@ class UtilityTests(unittest.TestCase):
         )
         self.assertIn("Codex 账号：default", text)
         self.assertIn("Effort：high", text)
+        self.assertIn("Fast 模式：关闭", text)
         self.assertIn("登录状态：已登录（ChatGPT / plus）", text)
         self.assertIn("额度状态：已达到额度上限", text)
         self.assertIn("5 小时额度：已用 100%，剩余 0%", text)

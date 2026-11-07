@@ -31,6 +31,8 @@ class _FakeApp:
                         "model": "gpt-test",
                         "displayName": "GPT Test",
                         "isDefault": True,
+                        "additionalSpeedTiers": ["fast"],
+                        "serviceTiers": [{"id": "priority", "name": "Fast"}],
                         "defaultReasoningEffort": "medium",
                         "supportedReasoningEfforts": [
                             {"reasoningEffort": "low"},
@@ -80,6 +82,8 @@ class _FakeApp:
             return {"thread": {"id": "thr-new"}}
         if method == "thread/resume":
             return {"thread": {"id": params["threadId"]}}
+        if method == "thread/fork":
+            return {"thread": {"id": "thr-forked"}}
         raise AssertionError(f"Unexpected request: {method}")
 
 
@@ -154,10 +158,88 @@ class _InteractiveApp(_FakeApp):
                 },
             )
             return {}
+        if method == "model/list":
+            return await super().request(method, params)
         raise AssertionError(f"Unexpected request: {method}")
 
 
 class AgentServiceTests(unittest.IsolatedAsyncioTestCase):
+    async def test_fast_switch_overrides_each_turn_on_loaded_thread(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            state = StateStore(Path(temp) / "state.json")
+            state.ensure_default(42)
+            state.create_agent(42, "other")
+            config = SimpleNamespace(
+                max_parallel_turns=4, default_account="default", codex_model=None,
+                codex_cwd=Path(temp), codex_sandbox="danger-full-access",
+                turn_timeout_seconds=30,
+            )
+            app = _InteractiveApp()
+            service = AgentService(config, state, {"default": app})
+            for mode, tier in (("on", "fast"), ("off", "default"), ("on", "fast")):
+                await service.set_agent_fast(42, "main", mode)
+                task = asyncio.create_task(service.run_turn(42, "main", "work"))
+                for _ in range(100):
+                    if state.get_agent(42, "main").get("active_turn_id"):
+                        break
+                    await asyncio.sleep(0)
+                self.assertEqual(app.requests[-1][0], "turn/start")
+                self.assertEqual(app.requests[-1][1]["serviceTier"], tier)
+                with self.assertRaisesRegex(ValueError, "正在运行"):
+                    await service.set_agent_fast(42, "main", "off")
+                app.emit("turn/completed", {
+                    "threadId": "thr-run",
+                    "turn": {"id": "turn-run", "status": "completed"},
+                })
+                self.assertEqual((await task).status, "completed")
+            self.assertEqual(sum(m == "thread/start" for m, _ in app.requests), 1)
+            start_params = next(p for m, p in app.requests if m == "thread/start")
+            self.assertEqual(start_params["serviceTier"], "fast")
+            self.assertFalse(state.get_agent(42, "other")["fast"])
+            with self.assertRaisesRegex(ValueError, "用法"):
+                await service.set_agent_fast(42, "main", "invalid")
+            self.assertTrue(state.get_agent(42, "main")["fast"])
+
+    async def test_fast_rejects_unsupported_model_and_resets_on_model_change(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            state = StateStore(Path(temp) / "state.json")
+            state.ensure_default(42)
+            config = SimpleNamespace(
+                max_parallel_turns=4, default_account="default", codex_model=None,
+            )
+            service = AgentService(config, state, {"default": _FakeApp()})
+            await service.set_agent_fast(42, "main", "ON")
+            self.assertTrue(state.get_agent(42, "main")["fast"])
+            await service.set_agent_model(42, "main", "gpt-fast")
+            self.assertFalse(state.get_agent(42, "main")["fast"])
+            with self.assertRaisesRegex(ValueError, "不支持 Fast"):
+                await service.set_agent_fast(42, "main", "on")
+            self.assertFalse(state.get_agent(42, "main")["fast"])
+            await service.set_agent_fast(42, "main", "off")
+
+    async def test_fast_survives_resume_fork_and_thread_switch(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            state = StateStore(Path(temp) / "state.json")
+            state.ensure_default(42)
+            state.update_agent(42, "main", thread_id="thr-old", fast=True)
+            config = SimpleNamespace(
+                max_parallel_turns=4, default_account="default", codex_model=None,
+                codex_cwd=Path(temp), codex_sandbox="danger-full-access",
+            )
+            app = _FakeApp()
+            service = AgentService(config, state, {"default": app})
+            await service._ensure_thread(42, "main")
+            self.assertEqual(app.requests[-1][0], "thread/resume")
+            self.assertEqual(app.requests[-1][1]["serviceTier"], "fast")
+            await service.fork_agent(42, "child")
+            self.assertTrue(state.get_agent(42, "child")["fast"])
+            self.assertEqual(app.requests[-1][1]["serviceTier"], "fast")
+            await service.set_agent_fast(42, "child", "off")
+            await service.switch_agent_thread(42, "child", "default", "thr-history")
+            self.assertEqual(app.requests[-1][1]["serviceTier"], "default")
+            self.assertFalse(state.get_agent(42, "child")["fast"])
+            self.assertTrue(state.get_agent(42, "main")["fast"])
+
     async def test_reports_progress_and_interrupts_active_turn(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
             state = StateStore(Path(temp) / "state.json")
@@ -499,6 +581,7 @@ class AgentServiceTests(unittest.IsolatedAsyncioTestCase):
                 model="gpt-test",
                 effort="high",
                 last_error="old error",
+                fast=True,
             )
             config = SimpleNamespace(
                 max_parallel_turns=4,
@@ -518,6 +601,7 @@ class AgentServiceTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(agent["thread_id"], "thr-new")
             self.assertEqual(agent["model"], "gpt-test")
             self.assertEqual(agent["effort"], "high")
+            self.assertTrue(agent["fast"])
             self.assertEqual(agent["account"], "default")
             self.assertIsNone(agent["last_error"])
             self.assertNotIn(
@@ -527,3 +611,4 @@ class AgentServiceTests(unittest.IsolatedAsyncioTestCase):
                 ("default", "thr-new"), service._loaded_threads  # noqa: SLF001
             )
             self.assertEqual(app.requests[-1][0], "thread/start")
+            self.assertEqual(app.requests[-1][1]["serviceTier"], "fast")
